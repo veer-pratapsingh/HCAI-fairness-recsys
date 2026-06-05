@@ -1,0 +1,27 @@
+# Core data
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+
+# Classic ML / recommenders
+scikit-learn>=1.3
+lightfm>=1.17
+
+# Deep learning (SASRec). Install the CUDA build matching your GPU from pytorch.org if needed.
+torch>=2.1
+
+# Fairness metrics
+aif360>=0.6
+
+# Stats
+scipy>=1.11
+
+# Plotting
+matplotlib>=3.7
+
+# LLM recommender
+openai>=1.0
+
+# Config / utils
+pyyaml>=6.0
+tqdm>=4.65

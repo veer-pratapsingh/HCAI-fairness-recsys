@@ -1,0 +1,28 @@
+# Raw OULAD data — public (CC-BY 4.0) but too large / bloats the repo.
+# (studentVle.csv alone is ~450 MB, over GitHub's 100 MB limit.)
+# Download separately; see README "Data" section.
+anonymisedData/
+anonymisedData.zip
+*.zip
+
+# Processed data caches (regenerate from anonymisedData/)
+data/processed/
+
+# Secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Model checkpoints / large artifacts
+*.pt
+*.ckpt
+
+# OS
+.DS_Store
+Thumbs.db
