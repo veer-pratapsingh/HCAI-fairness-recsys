@@ -20,6 +20,7 @@ class Context:
     """Per-session side information passed to recommend()."""
     code_module: str
     code_presentation: str
+    id_student: int | None = None  # optional; used by group-aware models (Fix 2)
 
     @property
     def key(self) -> tuple[str, str]:

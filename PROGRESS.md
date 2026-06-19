@@ -1,11 +1,11 @@
-# Project Progress Report — What We Have Built So Far
+# Project Progress Report
 
 **Project:** Fairness Auditing & Mitigation in Adaptive Learning Pathway Recommendation
 **Course:** Human-Centred AI (HCAI), OvGU · **Group:** Akshat · Dhairithri · Veer · Harshit
 **Dataset:** OULAD (in `anonymisedData/`)
-**This document covers:** everything done from project start up to (and including) the tuned SASRec model. The LLM recommender (Phase 2.4) and Phases 4–7 are **not yet started**.
+**This document covers:** everything done through Phase 4 (both mitigation fixes running). Phase 5 (multi-seed), 6 (plots), and 7 (paper) are not yet started.
 
-> Companion docs: **[PROJECT_PLAN.md](PROJECT_PLAN.md)** = the full roadmap & decisions; **[README.md](README.md)** = how to run. This file = a detailed record of *what we did, file by file, plus all findings*.
+> Companion docs: **[PROJECT_PLAN.md](PROJECT_PLAN.md)** = the full roadmap & decisions; **[README.md](README.md)** = how to run. This file = a detailed record of what we did, file by file, plus all findings.
 
 ---
 
@@ -13,29 +13,31 @@
 
 | Phase | What | Status |
 |-------|------|--------|
-| 0 | Repo scaffold, deps, reproducibility | ✅ Done |
-| 1 | Data pipeline (sequences, splits, EDA) | ✅ Done |
-| 2.1 | Popularity baseline | ✅ Done |
-| 2.2 | Collaborative Filtering (ALS) | ✅ Done |
-| 2.3 | SASRec deep model (tuned) | ✅ Done |
-| 2.4 | LLM recommender (GPT-4o-mini) | ⬜ Not started (needs `OPENAI_API_KEY`) |
-| 3 | Measurement (accuracy + fairness) | ✅ Done |
-| 4 | Mitigation (fair-loss + reranking) | ⬜ Not started |
-| 5 | Experiments (5 seeds, stats) | ⬜ Not started |
-| 6 | Reporting (trade-off plots) | ⬜ Not started |
-| 7 | Paper & presentation | ⬜ Not started |
+| 0 | Repo scaffold, deps, reproducibility | Done |
+| 1 | Data pipeline (sequences, splits, EDA) | Done |
+| 2.1 | Popularity baseline | Done |
+| 2.2 | Collaborative Filtering (ALS) | Done |
+| 2.3 | SASRec deep model (tuned) | Done |
+| 2.4 | LLM recommender (DeepSeek) | Done (500-session sample, Decision D8) |
+| 3 | Measurement (accuracy + fairness) | Done — all 4 models audited |
+| 4.1 | Fix 1 — Fair training loss (FairSASRec) | Running (lam sweep in progress, seed 0) |
+| 4.2 | Fix 2 — Post-hoc reranking | Running (alpha sweep in progress, seed 0) |
+| 5 | Experiments (5 seeds, stats) | Not started |
+| 6 | Reporting (trade-off plots) | Not started |
+| 7 | Paper & presentation | Not started |
 
-**3 of 4 recommenders built, tuned, and fully audited** for accuracy AND fairness. The entire measurement loop is reusable: one command audits any model.
+**All 4 recommenders built and fully audited.** Both mitigation fixes are implemented and currently sweeping their hyperparameter grids (seed 0).
 
 ---
 
 ## 2. Environment (verified working)
 
-- **Python** 3.11.9
+- **Python** 3.11.9 (venv at `feast-mlops/.venv` has torch; system Python 3.12 for data-only work)
 - **pandas** 2.3.3, **numpy** 2.4.5, **pyarrow** 23.0.1
-- **implicit** 0.7.3 (CF — replaces LightFM, see §6.6)
-- **torch** 2.5.1+cu121 — **CUDA works** on **NVIDIA RTX 3050 Laptop (4 GB)**, driver 566.07
-- Not yet installed: `openai` (for Phase 2.4), `aif360` (we use a native equivalent, see §6.8)
+- **implicit** 0.7.3 (CF — replaces LightFM, see §6.7)
+- **torch** 2.5.1+cu121 — CUDA on NVIDIA RTX 3050 Laptop (4 GB), driver 566.07
+- **DeepSeek API** — used for LLM recommender (retrieve-then-rerank via `deepseek-chat`)
+- AIF360 not installed; SPD/EOD/AOD implemented natively with identical formulas
 
 ---
 
@@ -45,211 +47,228 @@
 HCAI/
 ├── anonymisedData/                 # raw OULAD CSVs (untouched)
 ├── data/processed/                 # generated caches (gitignored)
-│   ├── sequences.parquet           # one row per session: seq + protected attrs
-│   ├── item_vocab.parquet          # id_site <-> item_idx + activity_type
-│   └── splits.parquet              # leave-last-out train/val/test columns
+│   ├── sequences.parquet
+│   ├── item_vocab.parquet
+│   └── splits.parquet              # also contains all group columns (gender, imd_binary, ...)
 ├── src/
 │   ├── utils/
-│   │   ├── paths.py                # central file paths            (28 lines)
-│   │   └── seeds.py                # set_seed() + 5 seeds          (33 lines)
+│   │   ├── paths.py
+│   │   └── seeds.py
 │   ├── data/
-│   │   ├── protected.py            # group defs, IMD binarization  (84 lines)
-│   │   ├── build_sequences.py      # clickstream -> sequences      (184 lines)
-│   │   ├── splits.py               # leave-last-out split          (48 lines)
-│   │   └── eda_summary.py          # data sanity check             (50 lines)
+│   │   ├── protected.py
+│   │   ├── build_sequences.py
+│   │   ├── splits.py
+│   │   └── eda_summary.py
 │   ├── models/
-│   │   ├── base.py                 # Recommender interface         (39 lines)
-│   │   ├── popularity.py           # Popularity baseline           (51 lines)
-│   │   ├── cf.py                   # ALS collaborative filtering   (100 lines)
-│   │   └── sasrec.py               # SASRec + early stopping       (282 lines)
+│   │   ├── base.py                 # Context now carries optional id_student (for Fix 2)
+│   │   ├── popularity.py
+│   │   ├── cf.py
+│   │   ├── sasrec.py               # _loss() is overridable (used by Fix 1)
+│   │   └── llm.py                  # NEW: DeepSeek retrieve-then-rerank
 │   ├── eval/
-│   │   ├── accuracy.py             # Recall/NDCG/MRR + harness      (78 lines)
-│   │   └── fairness.py             # SPD/EOD/AOD + per-group gaps   (182 lines)
-│   └── mitigation/                 # (empty — Phase 4)
+│   │   ├── accuracy.py             # now passes id_student in Context
+│   │   └── fairness.py
+│   └── mitigation/                 # NEW (Phase 4)
+│       ├── fair_loss.py            # Fix 1: FairSASRec (lam-weighted group divergence)
+│       └── rerank.py               # Fix 2: group-calibrated score fusion
 ├── experiments/
-│   ├── run_popularity.py           # first end-to-end run          (44 lines)
-│   └── run_audit.py                # full audit: any model         (88 lines)
-├── results/                        # metrics + fairness CSVs (committed)
+│   ├── run_popularity.py
+│   ├── run_audit.py                # supports --model llm and --n_sessions flag
+│   └── run_mitigation.py           # NEW: sweeps lam (Fix 1) and alpha (Fix 2)
+├── results/                        # all CSVs committed
+│   ├── popularity_metrics/per_group/fairness.csv
+│   ├── cf_metrics/per_group/fairness.csv
+│   ├── sasrec_metrics/per_group/fairness.csv
+│   ├── llm_metrics/per_group/fairness.csv
+│   └── sasrec_fair_lamX_* / sasrec_rerank_aX_* (being written now)
 ├── requirements.txt
-├── PROJECT_PLAN.md                 # roadmap
-├── README.md                       # how to run
-└── PROGRESS.md                     # this file
+├── PROJECT_PLAN.md
+├── README.md
+└── PROGRESS.md
 ```
 
 ---
 
 ## 4. Locked design decisions (the foundation)
 
-These were decided before coding; everything depends on them.
-
 | # | Decision | Choice |
 |---|----------|--------|
-| D1 | What is an "item"? | **`id_site`** (~6,268 VLE activities after filtering) |
+| D1 | What is an "item"? | `id_site` (~6,268 VLE activities after filtering) |
 | D2 | User/session unit | `(id_student, code_module, code_presentation)` triple |
 | D3 | Compute | GPU (RTX 3050) |
-| D4 | LLM design | Retrieve-then-rerank (CF/popularity → 50 candidates → GPT-4o-mini top-10) |
-| D5 | Split | **Leave-last-out** per session (last = test, 2nd-last = val, rest = history) |
-| D6 | Min sequence length | **≥ 3** interactions |
-| D7 | IMD binarization | disadvantaged (0–40%) vs advantaged (50–100%); NaN = explicit "unknown" |
-| D8 | LLM test size | fixed sample (~2,000 sessions), same for all models, cached |
+| D4 | LLM design | Retrieve-then-rerank (Popularity -> 20 candidates -> DeepSeek reranks to top-10) |
+| D5 | Split | Leave-last-out per session (last = test, 2nd-last = val, rest = history) |
+| D6 | Min sequence length | >= 3 interactions |
+| D7 | IMD binarization | disadvantaged (0-40%) vs advantaged (50-100%); NaN = explicit "unknown" |
+| D8 | LLM test size | 500 sampled sessions (same seed-fixed sample for reproducibility) |
 
 ---
 
 ## 5. The task, in one paragraph
 
-OULAD is not natively a recommender dataset, so we framed it as **sequential next-activity recommendation**: each `(student, module, presentation)` is a *session*; its chronologically ordered VLE clicks form a *sequence* of `id_site` items; the model must **predict the next activity** the student opens. We then audit each model for fairness across **gender, age band, disability, and socioeconomic status (IMD)**.
+OULAD is not natively a recommender dataset, so we framed it as **sequential next-activity recommendation**: each `(student, module, presentation)` is a session; its chronologically ordered VLE clicks form a sequence of `id_site` items; the model must predict the next activity the student opens. We then audit each model for fairness across **gender, age band, disability, and socioeconomic status (IMD)**.
 
 ---
 
 ## 6. What each file does (in detail)
 
 ### 6.1 `src/utils/paths.py`
-Single source of truth for every file location (raw CSVs and generated parquet). Defines `ROOT` (project root, computed relative to the file), and constants like `STUDENT_VLE_CSV`, `SEQUENCES_PARQUET`, `RESULTS_DIR`. `ensure_dirs()` creates output folders. **Why it exists:** so no script hardcodes a path; everything imports from here.
+Single source of truth for every file location. Defines `ROOT`, raw CSV constants, processed parquet paths, and `RESULTS_DIR`. `ensure_dirs()` creates output folders.
 
 ### 6.2 `src/utils/seeds.py`
-`set_seed(seed)` seeds Python `random`, NumPy, and (if installed) PyTorch — including `cudnn.deterministic = True` — for reproducibility. Exposes `SEEDS = (0, 1, 2, 3, 4)`, the five seeds all experiments will use (Phase 5). torch is imported lazily so the data phase works without it.
+`set_seed(seed)` seeds Python `random`, NumPy, and PyTorch (including `cudnn.deterministic`) for reproducibility. Exposes `SEEDS = (0, 1, 2, 3, 4)`.
 
-### 6.3 `src/data/protected.py` — protected-attribute logic
-The single source of truth for how the 4 protected attributes become groups, so the pipeline and the fairness evaluator never disagree. Key pieces:
-- `DISADVANTAGED_BANDS` — the IMD bands counted as disadvantaged (0–50%).
-- `PROTECTED_ATTRS` — for each attribute, which value is "privileged" vs "unprivileged" for the AIF360-style metrics (e.g. gender M vs F, disability N vs Y, IMD advantaged vs disadvantaged).
-- `binarize_imd()` — normalizes messy raw `imd_band` strings (e.g. `"90-100%"`, missing values) into `imd_binary ∈ {disadvantaged, advantaged, unknown}` + an `imd_unknown` flag. **Implements Decision D7** (NaN never silently dropped).
-- `collapse_age_band()` — collapses the 3 age bands into binary `0-35` vs `35+` for SPD/EOD/AOD (the original 3-level band is kept for the per-group view).
-- `add_group_columns()` — adds `imd_binary`, `imd_unknown`, `age_binary` to a dataframe.
+### 6.3 `src/data/protected.py`
+Single source of truth for the 4 protected attributes. Contains `PROTECTED_ATTRS` (privileged/unprivileged split per attribute), `binarize_imd()` (Decision D7), `collapse_age_band()`, and `add_group_columns()`.
 
-### 6.4 `src/data/build_sequences.py` — the heavy lifter (Phase 1.1–1.2)
-Turns the **450 MB / 10.6 M-row** clickstream into model-ready sequences. Steps:
-1. `load_protected()` — reads `studentInfo.csv`, adds group columns.
-2. `load_activity_types()` — reads `vle.csv` → `id_site → activity_type`.
-3. `read_clickstream()` — reads `studentVle.csv` **in chunks** (default 2 M rows) with memory-frugal dtypes (ids `int32`, date `int16`), so 10.6 M rows fit in a few hundred MB.
-4. `build_visit_sequences()` — sorts each session by `date`, **collapses consecutive same-site repeats** (a student clicking the same page repeatedly becomes one visit), produces an ordered `id_site` list per session.
-5. Joins protected attributes; **drops sessions with < 3 visits (D6)** and reports the drop rate.
-6. `build_item_vocab()` — assigns each surviving `id_site` a contiguous `item_idx` (index 0 reserved for padding), attaches `activity_type`.
-7. Writes `sequences.parquet` + `item_vocab.parquet`.
+### 6.4 `src/data/build_sequences.py`
+Turns the 450 MB / 10.6 M-row clickstream into model-ready sequences via chunked read, dtype downcasting, per-session sorting, consecutive-visit collapse, and protected-attribute join. Writes `sequences.parquet` + `item_vocab.parquet`.
 
-**Run:** `python -m src.data.build_sequences`
+### 6.5 `src/data/splits.py`
+Leave-last-out split (Decision D5). `load_splits()` reads sequences and adds `test_target`, `test_input`, `val_target`, `val_input`, `train_history` per session. Caches to `splits.parquet` which also carries all group columns (no extra merge needed downstream).
 
-### 6.5 `src/data/splits.py` — leave-last-out (Phase 1.4, Decision D5)
-`make_splits()` adds, per session: `test_target` (last item), `test_input` (all but last), `val_target` (2nd-last), `val_input` / `train_history` (all but last two). Deterministic and **seed-independent** — only model init varies across seeds, never the data split. `load_splits()` loads sequences and attaches these columns, optionally caching to `splits.parquet`.
+### 6.6 `src/data/eda_summary.py`
+Sanity check: prints session/student/item counts, sequence-length stats, and group sizes. Flagged `age 55<=` as only 204 sessions (too small for stable fairness metrics).
 
-### 6.6 `src/data/eda_summary.py` — sanity check (Phase 1.5)
-Prints session/student/item counts, sequence-length distribution, and **group sizes per protected attribute** (flagging any group < 5% as noisy). This is where we caught the tiny `age_band 55<=` group. **Run:** `python -m src.data.eda_summary`
+### 6.7 `src/models/` -- the recommenders
 
-### 6.7 `src/models/` — the recommenders
-All share one interface in **`base.py`**: `fit(splits_df)` and `recommend(history, k, context) -> ranked item indices`. `Context` carries the session's module+presentation, because OULAD sites are presentation-specific (D1) — a model may only return items that exist in that presentation.
+All share the interface in `base.py`: `fit(splits_df)` and `recommend(history, k, context)`. `Context` was extended with an optional `id_student` field (used by the reranker; ignored by all other models).
 
-- **`popularity.py`** (Phase 2.1) — counts next-item frequency **within each presentation**, trained from `train_history` only (no leakage). Recommends the most popular unseen items. Also serves as the LLM's candidate generator.
-- **`cf.py`** (Phase 2.2) — Collaborative Filtering via **`implicit` ALS** matrix factorization. Builds a sparse `session × item` matrix from training history; at inference recomputes the user vector on the fly from the provided history (`recalculate_user=True`) and restricts candidates to the session's presentation. *(See §6.6 note on LightFM substitution below.)*
-- **`sasrec.py`** (Phase 2.3) — the centerpiece deep model. A causal (left-to-right) **2-block, 50-dim self-attention Transformer** (Kang & McAuley 2018 spec, from the slides). Highlights:
-  - Sequences left-padded and **truncated to the last 200 items** (median session is ~216 clicks).
-  - Trained with **BPR pairwise loss** + one sampled negative per position; the loss is a **swappable method** (`_loss`) so Phase 4's fair-loss can subclass without touching the training loop.
-  - **Validation-based early stopping** (added during tuning, see §8): tracks Recall@10 on a held-out 4,000-session sample, keeps the best-val weights, stops after 5 epochs of no improvement. Plus **dropout 0.3** and **weight decay 1e-4**.
-  - Inference scores the last-position representation against the presentation's candidate items.
+- **`popularity.py`** -- next-item frequency within each presentation; trained from `train_history` only. Also serves as the LLM candidate generator.
+- **`cf.py`** -- `implicit` ALS matrix factorization. Recomputes the user vector on the fly from provided history (`recalculate_user=True`). Replaces LightFM (fails to build on Python 3.11).
+- **`sasrec.py`** -- 2-block, 50-dim causal self-attention Transformer (Kang & McAuley 2018). BPR loss, validation-based early stopping (patience 5), dropout 0.3, weight decay 1e-4. The loss is a swappable `_loss()` method, used by Fix 1.
+- **`llm.py`** (NEW, Phase 2.4) -- retrieve-then-rerank using DeepSeek API (`deepseek-chat`). Popularity generates 20 candidates; history is expressed as `activity_type` labels (e.g. `forumng`, `quiz`); DeepSeek returns a JSON tag array ranking them. Falls back to popularity order if the API fails or returns unparseable output. Uses `urllib` (no extra dependency). Evaluated on 500 sampled sessions (Decision D8).
 
-### 6.8 `src/eval/` — measurement (Phase 3)
-- **`accuracy.py`** — `Recall@K`, `NDCG@K`, `MRR` (single relevant target, leave-last-out). `evaluate_model()` runs any recommender over the test split and returns **both** the aggregate metrics **and a per-session dataframe** (hit flag + rank). With `keep_topk=True` it also stores the full top-K list + target, which the fairness module needs.
-- **`fairness.py`** — two complementary views, both computed from the *same* predictions:
-  - **View A — per-group accuracy + gap (RQ3):** Recall@K/NDCG/MRR for every value of every attribute, plus the **max−min gap**. Multi-group, the most interpretable signal.
-  - **View B — SPD / EOD / AOD (AIF360 definitions):** frames recommendation as pointwise relevance classification using **sampled negatives** (1 true item + 100 sampled negatives per session; "predicted positive" = lands in top-K). From the per-group confusion counts it computes Statistical Parity Difference, Equal-Opportunity Difference, and Average-Odds Difference. **AIF360 isn't installed** (it's heavy/fragile on Py3.11), so these use the exact same formulas natively — swappable for the real library later with identical numbers.
+### 6.8 `src/mitigation/` -- fairness fixes (NEW, Phase 4)
 
-### 6.9 `experiments/` — runners
-- **`run_popularity.py`** — the first minimal end-to-end run (popularity accuracy only).
-- **`run_audit.py`** — **the reusable template.** Trains a chosen model once, evaluates accuracy, then runs both fairness views on the *same* predictions, prints everything, and writes `results/<model>_{metrics,per_group,fairness}.csv`. **Run:** `python -m experiments.run_audit --model {popularity,cf,sasrec}`
+- **`fair_loss.py`** -- `FairSASRecRecommender`: subclasses SASRec and overrides only `_loss()`. During `fit()` it reads `imd_binary` from the splits DataFrame and builds a per-sequence group label tensor (1=privileged, -1=unprivileged, 0=unknown). In `_loss()` it computes the gap in mean positive logit between groups in the batch and adds `lam * |mean_priv - mean_unpriv|` to the BPR loss. `lam=0` reproduces plain SASRec exactly.
+- **`rerank.py`** -- `RerankingRecommender`: wraps any base model with group-calibrated score fusion. Combined score = `(1-alpha) * base_rank_score + alpha * group_affinity(group, item)`. Group affinity = normalised item frequency in the student's own group's training history (built during `fit()`). Fetches `k*5` candidates from the base model, reranks, returns top-k. Uses `id_student` from Context to look up the student's group. `alpha=0` reproduces the base model exactly.
+
+### 6.9 `src/eval/`
+- **`accuracy.py`** -- Recall@K, NDCG@K, MRR. Now passes `id_student` in `Context` for every session.
+- **`fairness.py`** -- View A (per-group recall gap) and View B (SPD/EOD/AOD via sampled negatives). Both computed from the same predictions.
+
+### 6.10 `experiments/`
+- **`run_audit.py`** -- reusable audit harness. Supports `--model {popularity,cf,sasrec,llm}` and `--n_sessions` (for LLM sampling). Writes 3 CSVs per model.
+- **`run_mitigation.py`** (NEW) -- orchestrates both mitigation sweeps. Fix 1 sweeps `lam in {0.0, 0.1, 0.5, 1.0, 2.0}` (trains SASRec from scratch each time). Fix 2 trains SASRec once then sweeps `alpha in {0.0, 0.1, 0.3, 0.5, 0.7, 1.0}` (no retraining).
 
 ---
 
 ## 7. How to reproduce everything
 
 ```bash
-pip install -r requirements.txt                       # + torch cu121 (installed)
-python -m src.data.build_sequences                    # -> sequences.parquet, item_vocab.parquet
-python -m src.data.splits                             # -> splits.parquet
-python -m src.data.eda_summary                        # sanity check
-python -m experiments.run_audit --model popularity    # baseline
-python -m experiments.run_audit --model cf            # collaborative filtering
-python -m experiments.run_audit --model sasrec        # deep model (GPU)
+# Use the venv that has torch:
+VENV="C:/Users/avina/OneDrive/Desktop/feast-mlops/.venv/Scripts/python.exe"
+
+# Data pipeline (one-time)
+$VENV -m src.data.build_sequences
+$VENV -m src.data.splits
+$VENV -m src.data.eda_summary
+
+# Model audits
+$VENV -m experiments.run_audit --model popularity
+$VENV -m experiments.run_audit --model cf
+$VENV -m experiments.run_audit --model sasrec
+$VENV -m experiments.run_audit --model llm --n_sessions 500
+
+# Mitigation sweeps (Phase 4)
+$VENV -m experiments.run_mitigation --fix 2 --seed 0   # fast: no retraining
+$VENV -m experiments.run_mitigation --fix 1 --seed 0   # slow: trains SASRec 5x
 ```
 
 ---
 
-## 8. The SASRec tuning story (a key result)
+## 8. The SASRec tuning story
 
-The **first** SASRec run (20 epochs, no early stopping) **overfit**: training loss collapsed to **0.013** (memorizing train) and test Recall@10 was only **3.85%** — *worse than CF*. This contradicted the RQ1 hypothesis, but the cause was overfitting, not the model.
-
-**Fix:** added validation-based early stopping (patience 5) on a 4,000-session held-out Recall@10, dropout 0.2→0.3, weight decay 1e-4. The run now visibly shows the trade-off — training loss keeps dropping while **val Recall plateaus around 0.077 and wobbles** — and stops at the best epoch (22), restoring those weights.
+The first SASRec run (20 epochs, no early stopping) overfit: training loss collapsed to 0.013 and test Recall@10 was only 3.85% — worse than CF. Fix: validation-based early stopping (patience 5) on a 4,000-session held-out Recall@10, dropout 0.2->0.3, weight decay 1e-4. Stopped at epoch 22.
 
 | SASRec | Recall@10 | NDCG@10 | MRR |
 |--------|-----------|---------|-----|
 | Before (overfit, 20 ep) | 3.85% | 2.11% | 1.59% |
-| **After (early stop @22)** | **4.06%** | **2.22%** | **1.67%** |
+| After (early stop @22) | 4.06% | 2.22% | 1.67% |
 
-+5.5% relative, and the tiny `age 55<=` group's recall **doubled** (0.0147 → 0.0294) — regularization helped small groups generalize.
++5.5% relative improvement. The tiny `age 55<=` group's recall doubled (0.0147 -> 0.0294) — regularization helped small groups generalize.
 
 ---
 
 ## 9. ALL FINDINGS SO FAR
 
-### 9.1 Data findings (from the pipeline + EDA)
-- **10,655,280** clickstream rows processed into **29,228** raw sessions → **28,761 kept** (only **1.6%** dropped for < 3 visits).
-- **25,745** unique students, **6,268** items (VLE sites). Note: only ~29k of the 32,593 enrolments appear in the clickstream — **some enrolled students never clicked** (worth one line in the paper's data section).
-- **Sequences are long:** median **216** clicks, mean **331**, max **2,947** → SASRec must truncate (we use last 200).
-- **Group sizes** (fairness-relevant):
-  - gender: M 55.7% / F 44.3%
-  - age_band: 0-35 **69.9%** / 35-55 29.3% / **55<= only 0.7% (204 sessions) ← too small, noisy**
-  - disability: N 90.4% / Y 9.6%
-  - imd_binary: disadvantaged 51.8% / advantaged 44.6% / **unknown 3.6% (1,047, reported separately)**
-- **Implication:** `age_band 55<=` is too small for stable fairness metrics → we use **`age_binary` (0-35 vs 35+)** for SPD/EOD/AOD.
+### 9.1 Data findings
 
-### 9.2 Accuracy findings (RQ1) — Recall@10 over all 28,761 sessions
-| Model | Recall@10 | NDCG@10 | MRR |
-|-------|-----------|---------|-----|
-| Popularity | 3.26% | 1.76% | 1.31% |
-| **CF (ALS)** | **4.20%** | **2.37%** | **1.82%** |
-| SASRec (tuned) | 4.06% | 2.22% | 1.67% |
+- **10,655,280** clickstream rows -> **28,761 sessions kept** (only 1.6% dropped for < 3 visits)
+- **25,745** unique students, **6,268** items (VLE sites)
+- Sequences: median **216** clicks, mean **331**, max **2,947**
+- Group sizes: gender M 55.7% / F 44.3%; age 0-35 69.9% / 35-55 29.3% / **55<= 0.7% (204 sessions -- too small)**; disability N 90.4% / Y 9.6%; imd disadvantaged 51.8% / advantaged 44.6% / unknown 3.6%
 
-- Absolute numbers are low **by nature** — predicting the exact next click out of ~6,268 items is hard. What matters for the RQs is the **relative** ranking and the fairness gaps.
-- **CF beats both** the popularity floor (+29%) and tuned SASRec. **CF ≈ SASRec (4.20% vs 4.06%)** — they are **neck-and-neck**.
-- **This challenges the RQ1 hypothesis** ("SASRec = best balance"). On OULAD's next-activity task, **global co-occurrence (CF) is about as strong as sequence-order modeling (SASRec)** — a legitimate, discussable result. The 5-seed runs + paired Wilcoxon test (Phase 5) will tell us whether the CF–SASRec gap is even statistically significant.
+### 9.2 Accuracy findings (RQ1)
 
-### 9.3 Fairness findings (RQ3) — consistent across all 3 models
-Per-group **Recall@10 gap** (max−min; bigger = more unfair):
+| Model | Recall@10 | NDCG@10 | MRR | Test set |
+|-------|-----------|---------|-----|----------|
+| Popularity | 3.26% | 1.76% | 1.31% | 28,761 sessions |
+| CF (ALS) | **4.20%** | **2.37%** | **1.82%** | 28,761 sessions |
+| SASRec (tuned) | 4.06% | 2.22% | 1.67% | 28,761 sessions |
+| LLM (DeepSeek) | 2.40% | 0.83% | 0.38% | 500 sampled sessions |
 
-| Attribute | Popularity | CF | SASRec |
-|-----------|-----------|-----|--------|
-| gender | 0.0026 | 0.0010 | 0.0018 |
-| age_band* | 0.0244 | 0.0296 | 0.0135 |
-| disability | 0.0078 | 0.0055 | 0.0041 |
-| imd | 0.0139 | 0.0201 | 0.0151 |
+Key findings:
+- CF is the best single model, narrowly ahead of SASRec (4.20% vs 4.06% -- likely not significant; Phase 5 Wilcoxon will confirm)
+- LLM underperforms all classical models. Retrieve-then-rerank with activity-type labels does not give the model enough signal to distinguish 20 similar candidates. This contradicts the hypothesis that LLM = most accurate.
+- Absolute recall numbers are low by nature -- predicting the exact next click out of ~6,268 items is hard. Relative differences and fairness gaps are the meaningful quantities.
 
-\* age_band gap is inflated by the tiny `55<=` group — treat with caution.
+### 9.3 Fairness findings (RQ3) -- per-group Recall@10 gap (max-min)
 
-Robust patterns (hold on every model):
-1. **Gender gap is the smallest** ✓ — consistent with the RQ3 hypothesis.
-2. **Disadvantaged-IMD students get *higher* recall, not lower** (e.g. SASRec: disadvantaged 4.66% vs advantaged 3.45%, **EOD +0.012**). All three models currently **favour** disadvantaged-IMD and disabled students, because those groups follow more **predictable, popular** learning paths that are easier to predict.
-3. age_band shows the largest *raw* gap, but it is a small-sample artifact of the 204-session `55<=` group, not a reliable signal.
+| Attribute | Popularity | CF | SASRec | LLM |
+|-----------|-----------|-----|--------|-----|
+| gender | 0.0026 | 0.0010 | 0.0018 | 0.0038 |
+| age_band* | 0.0244 | 0.0296 | 0.0135 | 0.0074 |
+| disability | 0.0078 | 0.0055 | 0.0041 | 0.0025 |
+| imd | 0.0139 | 0.0201 | 0.0151 | 0.0283** |
 
-**Important nuance for the paper:** the RQ3 hypothesis expected IMD to be the *worst-treated* group. So far the *opposite* holds for these models — IMD-disadvantaged students are *advantaged* by the recommender. The real test is whether the **LLM** (Phase 2.4) reverses this, since the hypothesis is that the LLM will be the least fair.
+\* age gap inflated by tiny 55<= group (204 sessions).
+\** LLM imd gap is inflated by 20 "unknown" sessions getting 0% recall.
 
-### 9.4 SPD / EOD / AOD (ideal = 0; sign shows favoured group)
-All three metrics are small in magnitude (< 0.02) for all models, confirming the gaps above are modest. EOD for gender numerically equals the raw recall gap (a correctness check that the metric is wired right). The IMD EOD is consistently **positive** (favouring disadvantaged) across models.
+Robust patterns (hold across all 4 models):
+1. **Gender gap is consistently the smallest** -- confirms the RQ3 hypothesis.
+2. **Disadvantaged-IMD students get higher recall, not lower** (e.g. SASRec: disadvantaged 4.66% vs advantaged 3.45%, EOD +0.012). All models currently favour disadvantaged-IMD and disabled students. These groups follow more predictable, popular learning paths that are easier to predict. This is the **inverse of the RQ3 hypothesis**.
+3. LLM shows the smallest disability and age gaps but the largest gender gap among the four models.
 
-### 9.5 Engineering / reproducibility findings (for the paper's methods + limitations)
-- **LightFM does not build on Python 3.11** (`__LIGHTFM_SETUP__` error) → substituted **`implicit` ALS** (same implicit-CF task; ALS chosen over BPR because it supports `recalculate_user`, which leave-last-out needs). Documented in `cf.py`.
-- **AIF360 not installed** (heavy/fragile on Py3.11) → SPD/EOD/AOD implemented natively with **identical formulas**; can be swapped for AIF360 later without changing numbers.
-- The fairness module reuses the **exact predictions** the accuracy evaluator produced (via `keep_topk`), so accuracy and fairness can never disagree.
+### 9.4 SPD / EOD / AOD summary
+
+All metrics are small in magnitude (< 0.02) for classical models, confirming fairness gaps are modest overall. The IMD EOD is consistently positive (favouring disadvantaged) across all 4 models. LLM fairness metrics are on par with classical models despite much lower accuracy.
+
+### 9.5 Phase 4 design (mitigation)
+
+**Fix 1 -- FairSASRec (fair training loss):**
+- Loss = BPR + lam * |mean_pos_logit(privileged) - mean_pos_logit(unprivileged)|
+- Group labels attached to training sequences during fit(); divergence computed per mini-batch
+- lam grid: {0.0, 0.1, 0.5, 1.0, 2.0} -- each is one point on the RQ2 trade-off curve
+- lam=0 exactly reproduces plain SASRec (verified: same training trajectory)
+
+**Fix 2 -- Reranking (post-hoc score fusion):**
+- Combined score = (1-alpha) * base_rank_score + alpha * group_affinity(student_group, item)
+- Group affinity = normalised item frequency in the student's own group's training history
+- Trains SASRec once; applies reranking at inference for each alpha -- no retraining needed
+- alpha grid: {0.0, 0.1, 0.3, 0.5, 0.7, 1.0}
+- alpha=0 exactly reproduces plain SASRec
+
+### 9.6 Engineering / reproducibility notes
+
+- LightFM fails to build on Python 3.11 -> substituted `implicit` ALS (same task; supports `recalculate_user` for leave-last-out). Documented in `cf.py`.
+- AIF360 not installed -> SPD/EOD/AOD implemented natively with identical formulas; swappable for AIF360 later without changing numbers.
+- Fairness module reuses the exact predictions the accuracy evaluator produced (`keep_topk=True`), so accuracy and fairness can never disagree.
+- All non-ASCII characters removed from Python source files (Windows cp1252 terminal compatibility).
+- Group columns (gender, imd_binary, etc.) live directly in `splits.parquet` -- no extra merge needed in experiment scripts.
 
 ---
 
-## 10. What's next (not yet done)
+## 10. What's next
 
-1. **Phase 2.4 — LLM recommender** (retrieve-then-rerank, GPT-4o-mini). Needs `OPENAI_API_KEY`; will cap to a fixed ~2,000-session sample (D8) with response caching. **This is the key test of the RQ1/RQ3 hypotheses about the LLM being most-accurate / least-fair.**
-2. **Phase 4 — Mitigation:** Fix 1 (FairSR-style fair loss in SASRec, λ-sweep) + Fix 2 (post-hoc exposure reranking). The SASRec loss is already swappable for Fix 1.
-3. **Phase 5 — Experiments:** all models × **5 seeds**, bootstrap CIs, paired Wilcoxon significance (RQ2 trade-off curves).
-4. **Phase 6 — Reporting:** accuracy-vs-fairness trade-off plot + per-group bar charts.
-5. **Phase 7 — Paper (due 10 July) + slides (16–17 July).**
+1. **Phase 4 (completing):** Wait for lam and alpha sweep results (seed 0). Read trade-off tables and characterise the accuracy-vs-fairness curve for RQ2.
+2. **Phase 5:** Run all 4 models + both mitigation fixes across 5 seeds. Compute mean +/- std, bootstrap CIs, paired Wilcoxon tests for significance.
+3. **Phase 6:** Trade-off plot (x = Recall@10, y = IMD recall gap); per-group bar charts for each model.
+4. **Phase 7:** Paper (due 10 July) + slides (16-17 July).
 
 ---
 
 ## 11. One-line summary
 
-We built a complete, reproducible **OULAD next-activity recommendation + fairness-audit pipeline** and evaluated **3 of 4 models**. Headline so far: **CF ≈ tuned SASRec (both ~4.1% Recall@10), both beating popularity**; fairness gaps are **small, with gender most equal and IMD-disadvantaged students currently *favoured*** — the inverse of the stated hypothesis, making the upcoming LLM and mitigation experiments the decisive ones.
+All 4 recommenders are built and audited; both Phase 4 mitigation fixes are implemented and sweeping their hyperparameter grids. Headline so far: **CF ~= tuned SASRec (~4.1% Recall@10), LLM underperforms at 2.4%, and disadvantaged-IMD students are consistently favoured by all models** -- the inverse of the RQ3 hypothesis, making the mitigation experiments and the paper's discussion section the decisive outputs.

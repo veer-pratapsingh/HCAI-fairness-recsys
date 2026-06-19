@@ -50,7 +50,7 @@ def evaluate_model(
         rows = tqdm(rows, total=len(test_df), desc=f"eval:{model.name}")
 
     for row in rows:
-        ctx = Context(row.code_module, row.code_presentation)
+        ctx = Context(row.code_module, row.code_presentation, id_student=row.id_student)
         ranked = model.recommend(list(row.test_input), k, ctx)
         rank = rank_of_target(ranked, row.test_target)
         hit = rank is not None and rank <= k
