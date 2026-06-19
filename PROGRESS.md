@@ -3,7 +3,7 @@
 **Project:** Fairness Auditing & Mitigation in Adaptive Learning Pathway Recommendation
 **Course:** Human-Centred AI (HCAI), OvGU · **Group:** Akshat · Dhairithri · Veer · Harshit
 **Dataset:** OULAD (in `anonymisedData/`)
-**This document covers:** everything done through Phase 4 (both mitigation fixes running). Phase 5 (multi-seed), 6 (plots), and 7 (paper) are not yet started.
+**This document covers:** everything done through Phase 4 (both mitigation fixes complete, seed 0). Phase 5 (multi-seed), 6 (plots), and 7 (paper) are not yet started.
 
 > Companion docs: **[PROJECT_PLAN.md](PROJECT_PLAN.md)** = the full roadmap & decisions; **[README.md](README.md)** = how to run. This file = a detailed record of what we did, file by file, plus all findings.
 
@@ -20,13 +20,13 @@
 | 2.3 | SASRec deep model (tuned) | Done |
 | 2.4 | LLM recommender (DeepSeek) | Done (500-session sample, Decision D8) |
 | 3 | Measurement (accuracy + fairness) | Done — all 4 models audited |
-| 4.1 | Fix 1 — Fair training loss (FairSASRec) | Running (lam sweep in progress, seed 0) |
-| 4.2 | Fix 2 — Post-hoc reranking | Running (alpha sweep in progress, seed 0) |
+| 4.1 | Fix 1 — Fair training loss (FairSASRec) | Done (lam={0,0.1,0.5,1.0,2.0}, seed 0) |
+| 4.2 | Fix 2 — Post-hoc reranking | Done (alpha={0,0.1,0.3,0.5,0.7,1.0}, seed 0) |
 | 5 | Experiments (5 seeds, stats) | Not started |
 | 6 | Reporting (trade-off plots) | Not started |
 | 7 | Paper & presentation | Not started |
 
-**All 4 recommenders built and fully audited.** Both mitigation fixes are implemented and currently sweeping their hyperparameter grids (seed 0).
+**All 4 recommenders built and fully audited. Both Phase 4 mitigation sweeps complete (seed 0).** Fix 2 gives a gentler accuracy-fairness trade-off than Fix 1; optimal point is alpha=0.7 (-13% accuracy, -20% IMD EOD). Best Fix 1 point is lam=1.0 (-30% accuracy, -55% IMD EOD).
 
 ---
 
@@ -80,7 +80,8 @@ HCAI/
 │   ├── cf_metrics/per_group/fairness.csv
 │   ├── sasrec_metrics/per_group/fairness.csv
 │   ├── llm_metrics/per_group/fairness.csv
-│   └── sasrec_fair_lamX_* / sasrec_rerank_aX_* (being written now)
+│   ├── sasrec_fair_lam{0.0,0.1,0.5,1.0,2.0}_{metrics,per_group,fairness}.csv
+│   └── sasrec_rerank_a{0.0,0.1,0.3,0.5,0.7,1.0}_{metrics,per_group,fairness}.csv
 ├── requirements.txt
 ├── PROJECT_PLAN.md
 ├── README.md
@@ -235,20 +236,41 @@ Robust patterns (hold across all 4 models):
 
 All metrics are small in magnitude (< 0.02) for classical models, confirming fairness gaps are modest overall. The IMD EOD is consistently positive (favouring disadvantaged) across all 4 models. LLM fairness metrics are on par with classical models despite much lower accuracy.
 
-### 9.5 Phase 4 design (mitigation)
+### 9.5 Phase 4 results (mitigation, seed 0)
 
 **Fix 1 -- FairSASRec (fair training loss):**
 - Loss = BPR + lam * |mean_pos_logit(privileged) - mean_pos_logit(unprivileged)|
 - Group labels attached to training sequences during fit(); divergence computed per mini-batch
-- lam grid: {0.0, 0.1, 0.5, 1.0, 2.0} -- each is one point on the RQ2 trade-off curve
-- lam=0 exactly reproduces plain SASRec (verified: same training trajectory)
+- lam=0 exactly reproduces plain SASRec (verified: same 27-epoch training trajectory)
+
+| lam | Recall@10 | vs baseline | IMD EOD | vs baseline |
+|-----|-----------|-------------|---------|-------------|
+| 0.0 | 4.06% | -- | 0.0121 | -- |
+| 0.1 | 3.12% | -23% | 0.0068 | -44% |
+| 0.5 | 3.06% | -25% | 0.0077 | -37% |
+| 1.0 | 2.84% | -30% | 0.0055 | -55% |
+| 2.0 | 2.45% | -40% | 0.0053 | -56% |
+
+**Best Fix 1 trade-off: lam=1.0** (-30% accuracy, -55% IMD EOD). Higher lam gives minimal additional fairness gain at steep accuracy cost.
 
 **Fix 2 -- Reranking (post-hoc score fusion):**
 - Combined score = (1-alpha) * base_rank_score + alpha * group_affinity(student_group, item)
 - Group affinity = normalised item frequency in the student's own group's training history
 - Trains SASRec once; applies reranking at inference for each alpha -- no retraining needed
-- alpha grid: {0.0, 0.1, 0.3, 0.5, 0.7, 1.0}
 - alpha=0 exactly reproduces plain SASRec
+
+| alpha | Recall@10 | vs baseline | IMD EOD | vs baseline |
+|-------|-----------|-------------|---------|-------------|
+| 0.0 | 4.06% | -- | 0.0121 | -- |
+| 0.1 | 4.01% | -1% | 0.0120 | -1% |
+| 0.3 | 3.82% | -6% | 0.0112 | -8% |
+| 0.5 | 3.64% | -10% | 0.0105 | -13% |
+| 0.7 | 3.54% | -13% | 0.0097 | -20% |
+| 1.0 | 3.25% | -20% | 0.0113 | +7% (worse!) |
+
+**Best Fix 2 trade-off: alpha=0.7** (-13% accuracy, -20% IMD EOD). alpha=1.0 reverses gains -- pure group affinity overpowers the SASRec signal.
+
+**Key comparison:** Fix 2 is the better mitigation strategy for this dataset. At comparable accuracy cost (~-13%), Fix 2 (alpha=0.7) achieves -20% IMD EOD while Fix 1 (lam=0.1) achieves -44% IMD EOD at -23% accuracy cost -- Fix 1 can do more but costs more.
 
 ### 9.6 Engineering / reproducibility notes
 
@@ -262,13 +284,12 @@ All metrics are small in magnitude (< 0.02) for classical models, confirming fai
 
 ## 10. What's next
 
-1. **Phase 4 (completing):** Wait for lam and alpha sweep results (seed 0). Read trade-off tables and characterise the accuracy-vs-fairness curve for RQ2.
-2. **Phase 5:** Run all 4 models + both mitigation fixes across 5 seeds. Compute mean +/- std, bootstrap CIs, paired Wilcoxon tests for significance.
-3. **Phase 6:** Trade-off plot (x = Recall@10, y = IMD recall gap); per-group bar charts for each model.
-4. **Phase 7:** Paper (due 10 July) + slides (16-17 July).
+1. **Phase 5 (next):** Run all 4 baseline models + Fix 1 (lam=1.0) + Fix 2 (alpha=0.7) across seeds 1-4. Compute mean +/- std, bootstrap CIs, paired Wilcoxon significance tests.
+2. **Phase 6:** Trade-off plot (x = Recall@10, y = IMD EOD); per-group Recall@10 bar charts for each model and best mitigation point.
+3. **Phase 7:** Paper (due 10 July) + slides (16-17 July).
 
 ---
 
 ## 11. One-line summary
 
-All 4 recommenders are built and audited; both Phase 4 mitigation fixes are implemented and sweeping their hyperparameter grids. Headline so far: **CF ~= tuned SASRec (~4.1% Recall@10), LLM underperforms at 2.4%, and disadvantaged-IMD students are consistently favoured by all models** -- the inverse of the RQ3 hypothesis, making the mitigation experiments and the paper's discussion section the decisive outputs.
+All 4 recommenders are built and audited; both Phase 4 mitigation sweeps are complete (seed 0). Headline: **CF ~= tuned SASRec (~4.1% Recall@10), LLM underperforms at 2.4%, and disadvantaged-IMD students are consistently favoured by all models** (inverse of the expected RQ3 direction). Phase 4 shows Fix 2 (post-hoc reranking, alpha=0.7) is the better mitigation: -20% IMD EOD at only -13% accuracy cost, vs Fix 1's -55% IMD EOD at -30% accuracy. Next: multi-seed Phase 5 to establish statistical significance.
