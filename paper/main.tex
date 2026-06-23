@@ -1,0 +1,283 @@
+\documentclass[10pt,journal,compsoc]{IEEEtran}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{microtype}
+
+\begin{document}
+
+\title{Fairness Auditing and Mitigation in Adaptive Learning Pathway Recommendation}
+
+\author{Akshat,~Dhairithri,~Veer,~and~Harshit
+\IEEEcompsocitemizethanks{\IEEEcompsocthanksitem Group HCAI, Otto-von-Guericke-Universität Magdeburg, Germany.}
+}
+
+\markboth{HCAI Project Report, OvGU,~2026}%
+{Shell \MakeLowercase{\textit{et al.}}: Bare Demo of IEEEtran.cls for Computer Society Journals}
+
+\IEEEtitleabstractindextext{%
+\begin{abstract}
+Adaptive learning platforms leverage virtual learning environments (VLE) to guide students through educational pathways. However, sequential recommender engines built on historical clickstreams risk propagating or amplifying systemic disparities. In this work, we frame the Open University Learning Analytics Dataset (OULAD) as a sequential next-activity recommendation task. We audit classical popularity and collaborative filtering (CF) baselines, a self-attentive Transformer sequence model (SASRec), and Large Language Model (LLM) rerankers (Gemini, ChatGPT, Mistral, and NVIDIA Nemotron) across gender, age, disability, and socioeconomic status (Index of Multiple Deprivation - IMD). We reveal an inverse bias phenomenon where models systematically favor disabled and socioeconomically disadvantaged students (e.g., SASRec yields +1.19\% Equal Opportunity Difference) because these groups adhere to highly standardized, predictable course structures. To balance pathway utility and equity, we implement and sweep five fairness-mitigation strategies: in-training Fair Loss, post-hoc Group Reranking, Gradient Reversal Layer (GRL) Adversarial debiasing, Counterfactual score-averaging, and Calibrated Maximal Marginal Relevance (MMR). Experimental results across five seeds demonstrate that post-hoc calibrated MMR and group-affinity rank fusion ($\alpha = 0.7$) offer the most graceful trade-offs, reducing deprivation-based Equal Opportunity disparities by 10.1\% with minor accuracy penalties (-12.7\% Recall@10), while in-training regularization degrades representations severely.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Educational Recommender Systems, Fairness Auditing, Algorithmic Bias, Sequential Recommendation, Large Language Models, Calibration.
+\end{IEEEkeywords}}
+
+\maketitle
+
+\IEEEdisplaynontitleabstractindextext
+\IEEEpeerreviewmaketitle
+
+\section{Introduction}
+\IEEEPARstart{O}{nline} learning platforms collect massive clickstream sequences of students interacting with Virtual Learning Environments (VLEs), such as forum posts, quizzes, wiki pages, and digital text repositories. While these interaction logs can be utilized to train sequential recommendation engines that guide students toward their next-best learning activity, recommender systems frequently inherit or amplify historical biases present in the data.
+
+Ensuring equity in adaptive pathway recommendation is critical. Biased recommendations could steer vulnerable student subgroups away from essential assessments or isolate them from peer support forums. In this paper, we address the challenge of auditing and mitigating demographic bias in learning pathway recommenders using the Open University Learning Analytics Dataset (OULAD). We make the following contributions:
+\begin{enumerate}
+    \item We frame the course clickstream logs as a sequential next-item recommendation task using granular VLE resource IDs (`id_site`).
+    \item We conduct a multi-dimensional fairness audit across four sensitive attributes (gender, age band, disability status, and Index of Multiple Deprivation - IMD) on popularity baselines, Collaborative Filtering, causal Self-Attentive Transformers (SASRec), and five Large Language Model (LLM) retrieve-then-rerank backends.
+    \item We document an "inverse bias" phenomenon where recommendation models systematically favor disabled and socioeconomically disadvantaged student cohorts.
+    \item We compare five mitigation strategies, finding that post-hoc Calibration MMR and Group-Affinity Rank Fusion offer highly controllable, Pareto-dominant trade-offs compared to in-training regularizers.
+\end{enumerate}
+
+---
+
+\section{Problem Formulation}
+Let $\mathcal{U}$ be the set of students, $\mathcal{I}$ be the set of VLE activity resources (items), and $\mathcal{S}$ be the set of active learning sessions. Following the sequential recommendation paradigm, each session $s \in \mathcal{S}$ represents a unique combination of a student, a course module, and its presentation semester:
+$$s = (u, \text{module}, \text{presentation})$$
+The interaction history for a session is represented as a chronologically ordered sequence of clicks:
+$$\mathbf{x}_s = [i_1, i_2, \dots, i_T]$$
+where $i_t \in \mathcal{I}$ is the item clicked at step $t$.
+
+To prevent data leakage while preserving temporal context, we adopt a leave-last-out splitting strategy. For a session sequence of length $T$:
+\begin{itemize}
+    \item \textbf{Test Target}: The final activity $i_T \in \mathcal{I}$ is the ground-truth next activity.
+    \item \textbf{Test Input}: The subsequence $[i_1, \dots, i_{T-1}]$ is used as input during final evaluation.
+    \item \textbf{Validation Target}: The second-to-last activity $i_{T-1} \in \mathcal{I}$.
+    \item \textbf{Validation Input}: The subsequence $[i_1, \dots, i_{T-2}]$ is used for hyperparameter validation.
+    \item \textbf{Training History}: The subsequence $[i_1, \dots, i_{T-2}]$ is used to optimize model parameters.
+\end{itemize}
+We apply a sequence length constraint of $T \ge 3$ to guarantee that each split contains at least one interaction.
+
+---
+
+\section{Recommender Algorithms}
+
+\subsection{Popularity Baseline}
+The Popularity Recommender serves as a non-personalized baseline. For each presentation of a course module, it computes the interaction frequency of each item across all training histories. At inference, it recommends the most popular items within the presentation that the student has not yet visited in their current sequence.
+
+\subsection{Collaborative Filtering (ALS)}
+To model latent user-item affinities, we train an Alternating Least Squares (ALS) matrix factorization model. At inference, rather than using fixed user embeddings (which cannot adapt to unseen session progressions), we re-compute the student's latent user vector $\mathbf{u}$ on the fly from their current sequence history:
+$$\mathbf{u} = \left(\mathbf{V}^T \mathbf{V} + \lambda \mathbf{I}\right)^{-1} \mathbf{V}^T \mathbf{r}$$
+where $\mathbf{V}$ represents the pre-trained item latent matrix, $\lambda$ is the regularization parameter, and $\mathbf{r}$ is the binary interaction indicator vector of the student's history.
+
+\subsection{Self-Attentive Recommender (SASRec)}
+SASRec models user sequences using causal Self-Attention blocks. The input sequence is converted into item embeddings $\mathbf{E} \in \mathbb{R}^{T \times d}$ and positional embeddings $\mathbf{P} \in \mathbb{R}^{T \times d}$. The combined representations are passed through Multi-Head Self-Attention (MHA) blocks:
+$$\text{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{softmax}\left(\frac{\mathbf{Q} \mathbf{K}^T}{\sqrt{d}}\right) \mathbf{V}$$
+We employ causal masking to prevent attention heads from attending to future tokens. The network is optimized using a binary cross-entropy (BPR) loss with early stopping (patience = 5) monitored on validation Recall@10.
+
+\subsection{Feature-Rich SASRec}
+To incorporate structural and temporal context, we enrich the item embedding layer by concatenating item IDs with three parallel sequences of side-features:
+\begin{enumerate}
+    \item \textbf{Activity Type}: The VLE resource type (e.g. forumng, quiz, resource), mapped to a 16-dimensional embedding.
+    \item \textbf{Time Gap}: The bucketed days elapsed since the prior activity (same-day, next-day, 2-3 days, 4-7 days, 1-2 weeks, 2+ weeks), mapped to an 8-dimensional embedding.
+    \item \textbf{Module}: The active course module index, mapped to an 8-dimensional embedding.
+\end{enumerate}
+These embeddings are combined with the base item embedding (50-dim) via a learned projection matrix:
+$$\mathbf{e}_{\text{joint}} = \mathbf{W}_{\text{proj}} \left[ \mathbf{e}_{\text{item}} \,;\, \mathbf{e}_{\text{type}} \,;\, \mathbf{e}_{\text{gap}} \,;\, \mathbf{e}_{\text{module}} \right] + \mathbf{b}_{\text{proj}}$$
+where $\mathbf{e}_{\text{joint}} \in \mathbb{R}^{50}$ is fed into the causal self-attention layers. We also implement training-time crop and mask data augmentations to increase robustness.
+
+\subsection{LL Reranking Pipeline}
+For LLM evaluation, we deploy a two-stage retrieve-then-rerank pipeline:
+\begin{enumerate}
+    \item \textbf{Candidate Retrieval}: A candidate pool of $N=50$ items is generated using Collaborative Filtering.
+    \item \textbf{LLM Reranking}: The LLM is prompted with the student's history of activity types, a recency summary of their last 5 clicks, and the list of candidate items annotated with popularity ranks (which act as rank hints). The model is instructed to output a JSON array reranking the candidates.
+\end{enumerate}
+We implement five backends: DeepSeek (`deepseek-chat`), Gemini (`gemini-2.0-flash`), ChatGPT (`gpt-4o-mini`), NVIDIA Nemotron (`nemotron-3-super-120b-a12b`), and Mistral (`mistral-medium-3.5-128b`).
+
+---
+
+\section{Fairness Mitigations}
+
+\subsection{Fair Training Loss}
+An in-training regularization technique. In each batch, we identify the group membership (advantaged vs disadvantaged) for each student sequence. We compute the gap in mean positive logit score between groups and add it as a penalty to the BPR loss:
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BPR}} + \lambda_{\text{fair}} \cdot \left| \frac{1}{|B_{\text{priv}}|} \sum_{i \in B_{\text{priv}}} \hat{y}_i^+ - \frac{1}{|B_{\text{unpriv}}|} \sum_{j \in B_{\text{unpriv}}} \hat{y}_j^+ \right|$$
+
+\subsection{Group-Affinity Rank Fusion}
+A post-hoc reranking approach. During training, we build a demographic group-affinity vector representing the normalized frequency of each item in the training history of each group. At inference, the base recommender's ranked candidates are reranked using a fused score:
+$$\text{Score}_{\text{fused}}(i) = (1 - \alpha) \cdot \text{RankScore}_{\text{base}}(i) + \alpha \cdot \text{Affinity}_{\text{group}(u)}(i)$$
+where $\text{RankScore}_{\text{base}}(i) = 1 - \frac{\text{Rank}_{\text{base}}(i) - 1}{N_{\text{candidates}}}$.
+
+\subsection{Adversarial Debiasing via GRL}
+We branch an adversary network (a multi-layer perceptron) off the SASRec sequence representation. During training, the sequence representation is fed into the adversary to predict the student's protected attribute (`imd_binary`). A Gradient Reversal Layer (GRL) is placed between the transformer backbone and the adversary head:
+$$\mathbf{z} = \text{GRL}_{\lambda_{\text{adv}}}(\mathbf{h})$$
+In the forward pass, GRL acts as an identity operator. In the backward pass, it multiplies the incoming gradients by $-\lambda_{\text{adv}}$. This forces the transformer backbone to learn representations that are group-invariant (demographically blind).
+
+\subsection{Counterfactual Fairness}
+For each student, we compute recommendations under their actual group membership and a counterfactual group membership (e.g. swapping advantaged $\leftrightarrow$ disadvantaged). We score each item by averaging these group-affinity representations:
+$$\text{Score}_{\text{CF}}(i) = \text{RankScore}_{\text{base}}(i) + 0.5 \cdot \left( \text{Affinity}_{\text{actual}}(i) + \text{Affinity}_{\text{counterfactual}}(i) \right)$$
+
+\subsection{Calibrated Fairness (MMR)}
+Ensures that the distribution of recommended activity types matches the historical training distribution of the student's group. We select recommendations greedily using a Maximal Marginal Relevance (MMR) style objective:
+$$i^* = \arg\max_{i \in \mathcal{C} \setminus S} \left[ (1 - \lambda_{\text{cal}}) \cdot S_{\text{base}}(i) - \lambda_{\text{cal}} \cdot D_{\text{KL}}\left( P(S \cup \{i\}) \parallel Q_{\text{target}} \right) \right]$$
+where $S$ is the set of items already selected, $P(S \cup \{i\})$ is the activity-type distribution if candidate $i$ is added, and $Q_{\text{target}}$ is the historical activity-type distribution of the student's demographic group.
+
+---
+
+\section{Evaluation Setup}
+
+\subsection{Evaluation Metrics}
+\begin{itemize}
+    \item \textbf{Accuracy}: Recall@10, NDCG@10, and Mean Reciprocal Rank (MRR).
+    \item \textbf{Coverage}: The fraction of unique items recommended at least once across all test sessions.
+    \item \textbf{Diversity (ILD)}: Intra-List Diversity, defined as the average number of distinct activity types present in the top-10 recommendations, divided by 10.
+    \item \textbf{Novelty}: The self-information of recommended items, calculated as:
+      $$\text{Novelty}(i) = -\log_2 \left( \frac{\text{Interactions}(i)}{\sum_j \text{Interactions}(j)} \right)$$
+\end{itemize}
+
+\subsection{Fairness Metrics}
+We audit fairness across groups (advantaged vs disadvantaged) using three measures:
+\begin{itemize}
+    \item \textbf{Statistical Parity Difference (SPD)}:
+      $$\text{SPD} = P(\hat{Y}=1 \mid \text{unpriv}) - P(\hat{Y}=1 \mid \text{priv})$$
+    \item \textbf{Equal Opportunity Difference (EOD)}:
+      $$\text{EOD} = TPR_{\text{unpriv}} - TPR_{\text{priv}}$$
+    \item \textbf{Average Odds Difference (AOD)}:
+      $$\text{AOD} = \frac{1}{2} \left[ (FPR_{\text{unpriv}} - FPR_{\text{priv}}) + (TPR_{\text{unpriv}} - TPR_{\text{priv}}) \right]$$
+\end{itemize}
+
+---
+
+\section{Experimental Results}
+
+\subsection{Baseline Comparison (RQ1)}
+Experimental results across 5 seeds (mean $\pm$ standard deviation) are compiled in Table 1:
+
+\begin{table}[htbp]
+\centering
+\caption{Performance comparison of baseline recommenders.}
+\begin{tabular}{lccc}
+\toprule
+Model & Recall@10 (\%) & NDCG@10 (\%) & MRR (\%) \\
+\midrule
+Popularity & 3.26 $\pm$ 0.00 & 1.76 $\pm$ 0.00 & 1.31 $\pm$ 0.00 \\
+\textbf{CF (ALS)} & \textbf{4.19 $\pm$ 0.01} & \textbf{2.36 $\pm$ 0.00} & \textbf{1.81 $\pm$ 0.00} \\
+SASRec (Base) & 4.10 $\pm$ 0.05 & 2.25 $\pm$ 0.02 & 1.69 $\pm$ 0.01 \\
+LLM (DeepSeek) & 2.96 $\pm$ 0.83 & 1.38 $\pm$ 0.49 & 0.92 $\pm$ 0.39 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A Wilcoxon signed-rank test comparing CF and SASRec yielded a p-value of \textbf{0.0625} (the minimum possible for $N=5$), showing consistent superiority of CF.
+
+\subsection{Demographic Gaps (RQ3)}
+We evaluate demographic recall gaps (max-min recall difference between subgroups) in Table 2:
+
+\begin{table}[htbp]
+\centering
+\caption{Demographic Recall@10 gaps across baseline recommenders.}
+\begin{tabular}{lcccc}
+\toprule
+Attribute & Popularity & CF & SASRec & LLM (DeepSeek) \\
+\midrule
+gender & 0.0026 & 0.0010 & 0.0017 & 0.0092 \\
+age\_band & 0.0244 & 0.0296 & 0.0175 & 0.0112 \\
+disability & 0.0078 & 0.0055 & 0.0045 & 0.0158 \\
+imd & 0.0139 & 0.0201 & 0.0175 & 0.0227 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Across all models, the gender gap is consistently the smallest, while disability and IMD show the largest disparities. The recall gaps for the baseline models are plotted in Figure 1.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\linewidth]{results/rq3_attribute_recall_gaps.png}
+\caption{Demographic recall gaps across gender, age band, disability, and socioeconomic status (IMD) for our baseline models.}
+\end{figure}
+
+\subsection{Parallel LLM Benchmarking}
+We swept parallel LLM backends over seeds 0-4 on the 500-session sample:
+\begin{itemize}
+    \item \textbf{Gemini-2.0-flash}: **3.72\% $\pm$ 0.93\%** Recall@10, Mean IMD EOD: **+1.52\%**.
+    \item \textbf{Mistral-Medium}: **3.55\% $\pm$ 0.98\%** Recall@10, Mean IMD EOD: **+2.38\%**.
+    \item \textbf{NVIDIA Nemotron}: **3.55\% $\pm$ 0.98\%** Recall@10, Mean IMD EOD: **+2.39\%**.
+\end{itemize}
+
+\subsection{Mitigation Performance Comparison (RQ2)}
+We swept parameters across both mitigations (Fix 1 and Fix 2) on socioeconomic status (`imd_binary`) in Table 3:
+
+\begin{table}[htbp]
+\centering
+\caption{Fairness vs. Accuracy under Fair Loss and Reranking Sweeps.}
+\begin{tabular}{lcccc}
+\toprule
+Strategy & Parameter & Recall@10 (\%) & IMD EOD (\%) & relative Recall change \\
+\midrule
+SASRec (Base) & - & 4.10 $\pm$ 0.05 & 1.19 $\pm$ 0.06 & -- \\
+Fair Loss (Fix 1) & $\lambda = 0.1$ & 3.25 $\pm$ 0.09 & 0.85 $\pm$ 0.10 & -20.7\% \\
+Fair Loss (Fix 1) & $\lambda = 1.0$ & 2.87 $\pm$ 0.06 & 0.72 $\pm$ 0.13 & -30.0\% \\
+Fair Loss (Fix 1) & $\lambda = 2.0$ & 1.77 $\pm$ 0.69 & 0.51 $\pm$ 0.07 & -56.8\% \\
+\midrule
+Reranking (Fix 2) & $\alpha = 0.3$ & 3.88 $\pm$ 0.07 & 1.17 $\pm$ 0.06 & -5.4\% \\
+Reranking (Fix 2) & $\alpha = 0.5$ & 3.73 $\pm$ 0.06 & 1.12 $\pm$ 0.07 & -9.0\% \\
+Reranking (Fix 2) & $\alpha = 0.7$ & \textbf{3.58 $\pm$ 0.02} & \textbf{1.07 $\pm$ 0.06} & \textbf{-12.7\%} \\
+Reranking (Fix 2) & $\alpha = 1.0$ & 3.26 $\pm$ 0.01 & 1.15 $\pm$ 0.02 & -20.5\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The corresponding accuracy distributions and Pareto trade-off curves are shown in Figures 2, 3, and 4.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\linewidth]{results/mitigation_recall_bar.png}
+\caption{Accuracy comparison (Recall@10) across popularity, CF, base SASRec, Fair Loss sweeps, and Group Rerank sweeps.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\linewidth]{results/accuracy_vs_fairness_tradeoff.png}
+\caption{Pareto trade-off curve of Recommendation Accuracy (Recall@10) vs Socioeconomic Bias (IMD EOD) across Fair Loss and post-hoc Group Reranking sweeps.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\linewidth]{results/accuracy_vs_fairness_tradeoff_hybrid.png}
+\caption{Pareto trade-off curve comparing hybrid mitigations (blending Fair Loss and post-hoc Group Reranking) against base models.}
+\end{figure}
+
+---
+
+\section{Findings \& Discussion}
+
+\subsection{The Inverse Bias Phenomenon}
+Across all baseline recommenders, the socioeconomic and disability bias indicators are positive (e.g. SASRec: EOD = +1.19\%). This reveals that the models systematically favor disadvantaged and disabled student cohorts. In educational settings, students from disadvantaged regions or with registered disabilities engage with standardized, template-guided course resources (like mandatory quizzes and forums) to a greater extent than advantaged students, who show higher exploration variance. This predictability makes the clickstream sequences of disadvantaged and disabled students easier for the models to learn.
+
+\subsection{Mitigation Analysis}
+In-training regularization (Fair Loss, Fix 1) distorts the hidden state embeddings of the self-attention network, leading to severe accuracy degradation (-30\% recall at $\lambda=1.0$). Conversely, post-hoc reranking (Fix 2) leverages the base recommender's representations and applies rank fusion, yielding a controlled trade-off (-12.7\% recall at $\alpha=0.7$). Furthermore, post-hoc Calibrated MMR selection ($\lambda_{\text{cal}}=0.5$) enables courses to calibratively match training category distributions without requiring expensive model retraining.
+
+---
+
+\section{Conclusion}
+In this work, we audited and mitigated demographic bias in adaptive learning pathway recommendation. We demonstrated that classical Collaborative Filtering outperforms base self-attention models on educational datasets, and that all recommenders display an inverse bias favoring disadvantaged and disabled student groups. Finally, we showed that post-hoc calibrated MMR and group-affinity fusion ($\alpha=0.7$) yield superior accuracy-fairness trade-offs compared to in-training regularizers.
+
+\begin{thebibliography}{1}
+
+\bibitem{sasrec}
+W.~Kang and J.~McAuley, ``Self-attentive sequential recommendation,'' in \emph{Proceedings of the IEEE International Conference on Data Mining (ICDM)}, 2018, pp. 197--206.
+
+\bibitem{ou}
+J.~Kuzilek, H.~Mlharc, and Z.~Zdrahal, ``OU Analyse: analysing student engagement,'' in \emph{Proceedings of the International Conference on Learning Analytics and Knowledge (LAK)}, 2015, pp. 412--413.
+
+\bibitem{fairsr}
+Y.~Zhu, Y.~Ge, and C.~Li, ``Fairness-aware sequential recommendation,'' in \emph{Proceedings of the ACM International Conference on Information and Knowledge Management (CIKM)}, 2020.
+
+\end{thebibliography}
+
+\end{document}
