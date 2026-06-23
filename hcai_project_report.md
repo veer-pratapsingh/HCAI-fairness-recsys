@@ -217,9 +217,9 @@ We swept parallel LLM backends over seeds 0-4 on the 500-session sample:
 - **Gemini-2.0-flash**: **3.72% $\pm$ 0.93%** Recall@10, Mean IMD EOD: **+1.52%**. Seed 1 reached **5.00%**.
 - **Mistral-Medium**: **3.55% $\pm$ 0.98%** Recall@10, Mean IMD EOD: **+2.38%**. Seed 1 reached **5.00%**.
 - **NVIDIA Nemotron**: **3.55% $\pm$ 0.98%** Recall@10, Mean IMD EOD: **+2.39%**. Seed 1 reached **5.00%**.
-- **ChatGPT (gpt-4o-mini)**: Smoke tested successfully on seed 0 (running successfully under API rate limits).
+- **ChatGPT (gpt-4o-mini)**: Evaluated on seed 0, achieving **3.40%** Recall@10, **1.48%** NDCG@10, and **0.93%** MRR, with an EOD bias of **+1.88%** (run time: 2,091.8s). This demonstrates that ChatGPT outperforms Gemini on seed 0 (Recall@10: 2.80%, EOD: +2.33%) in both utility and equity.
 
-*Key insight:* Gemini, Mistral, and Nemotron outperform DeepSeek. This is due to their better parsing of prompts, effective utilization of Collaborative Filtering candidate rankings, and robustness to popularity rank hints.
+*Key insight:* Gemini, ChatGPT, Mistral, and Nemotron outperform DeepSeek. This is due to their better parsing of prompts, effective utilization of Collaborative Filtering candidate rankings, and robustness to popularity rank hints.
 
 ### 7.3 Mitigation Performance Comparison (RQ2)
 We swept mitigation parameters for socioeconomic status (`imd_binary`):
