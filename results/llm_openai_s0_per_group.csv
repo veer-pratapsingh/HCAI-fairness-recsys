@@ -1,0 +1,10 @@
+attribute,group_value,n,recall,ndcg,mrr
+gender,F,1,0.0,0.0,0.0
+gender,M,1,0.0,0.0,0.0
+gender,__GAP(max-min)__,2,0.0,0.0,0.0
+age_band,35-55,2,0.0,0.0,0.0
+age_band,__GAP(max-min)__,2,0.0,0.0,0.0
+disability,N,2,0.0,0.0,0.0
+disability,__GAP(max-min)__,2,0.0,0.0,0.0
+imd_binary,advantaged,2,0.0,0.0,0.0
+imd_binary,__GAP(max-min)__,2,0.0,0.0,0.0

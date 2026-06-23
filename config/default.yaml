@@ -1,0 +1,66 @@
+# HCAI Fairness-in-RecSys Configuration
+
+data:
+  min_seq_len: 3
+  test_strategy: leave_last_out
+
+models:
+  popularity: {}
+  
+  cf:
+    factors: 64
+    iterations: 20
+    regularization: 0.01
+  
+  sasrec:
+    embed_dim: 50
+    num_blocks: 2
+    num_heads: 1
+    max_len: 200
+    dropout: 0.3
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 128
+    epochs: 100
+    patience: 5
+    val_sample: 4000
+  
+  sasrec_enhanced:
+    type_dim: 16
+    gap_dim: 8
+    module_dim: 8
+    augment: none
+  
+  llm:
+    n_candidates: 50
+    max_history: 10
+    retriever_type: cf
+    temperature: 0.0
+    max_tokens: 256
+
+mitigation:
+  fair_loss:
+    lam_values: [0.0, 0.1, 0.5, 1.0, 2.0]
+    fair_attr: imd_binary
+  reranking:
+    alpha_values: [0.0, 0.1, 0.3, 0.5, 0.7, 1.0]
+    fair_attr: imd_binary
+  adversarial:
+    lambda_values: [0.01, 0.05, 0.1, 0.5]
+    fair_attr: imd_binary
+  calibration:
+    lambda_cal: 0.5
+    fair_attr: imd_binary
+
+evaluation:
+  k: 10
+  n_neg: 100
+  extended_metrics: true
+
+experiment:
+  seeds: [0, 1, 2, 3, 4]
+  n_sessions: 500
+  llm_backends:
+    - deepseek
+    - gemini
+    - openai

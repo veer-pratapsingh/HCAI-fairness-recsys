@@ -1,0 +1,2 @@
+attribute,privileged,unprivileged,n_priv,n_unpriv,recall_priv,recall_unpriv,SPD,EOD,AOD
+gender,M,F,1,1,0.0,0.0,-0.029702970297029705,0.0,-0.015000000000000001

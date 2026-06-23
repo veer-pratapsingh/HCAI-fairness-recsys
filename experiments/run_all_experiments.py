@@ -53,7 +53,10 @@ def parse_args():
 
 def audit_model(model, splits, sequences, seed):
     """Evaluate accuracy and fairness, return flattened metrics dictionary."""
-    metrics, per_session = evaluate_model(model, splits, k=K, show_progress=False, keep_topk=True)
+    metrics, per_session = evaluate_model(
+        model, splits, k=K, show_progress=False, keep_topk=True,
+        extended_metrics=True, splits_df=splits
+    )
     per_session = attach_groups(per_session, sequences)
     
     # View A: Gaps
@@ -85,6 +88,9 @@ def audit_model(model, splits, sequences, seed):
         "Recall@10": metrics[f"Recall@{K}"],
         "NDCG@10": metrics[f"NDCG@{K}"],
         "MRR": metrics["MRR"],
+        "Coverage": metrics.get("Coverage", float("nan")),
+        "Diversity_ILD": metrics.get("Diversity_ILD", float("nan")),
+        "Novelty": metrics.get("Novelty", float("nan")),
     }
     res.update(gaps)
     res.update(fair_metrics)
@@ -250,7 +256,7 @@ def compute_statistics(df):
     models = df["model"].unique()
     
     summary_records = []
-    metrics_to_agg = ["Recall@10", "NDCG@10", "MRR", "imd_binary_recall_gap", "imd_SPD", "imd_EOD", "imd_AOD"]
+    metrics_to_agg = ["Recall@10", "NDCG@10", "MRR", "Coverage", "Diversity_ILD", "Novelty", "imd_binary_recall_gap", "imd_SPD", "imd_EOD", "imd_AOD"]
     
     # 1. Standard aggregations (mean, std, 95% CI)
     for model_name in models:

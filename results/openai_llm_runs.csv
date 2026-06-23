@@ -1,0 +1,2 @@
+model,seed,Recall@10,NDCG@10,MRR,gender_recall_gap,age_band_recall_gap,disability_recall_gap,imd_binary_recall_gap,gender_SPD,gender_EOD,gender_AOD,run_time_sec
+llm_openai,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-0.029702970297029705,0.0,-0.015000000000000001,9.656505584716797

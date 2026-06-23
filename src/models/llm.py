@@ -46,12 +46,13 @@ class LLMRecommender(Recommender):
     def __init__(
         self,
         api_key: str | None = None,
-        n_candidates: int = 20,
+        n_candidates: int = 50,
         max_history: int = 10,
         model: str = _DEFAULT_MODEL,
         seed: int = 0,
-        use_rank_hint: bool = False,
+        use_rank_hint: bool = True,
         retriever: Recommender | None = None,
+        retriever_type: str = "popularity",
     ) -> None:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self.n_candidates = n_candidates
@@ -59,7 +60,16 @@ class LLMRecommender(Recommender):
         self.model = model
         self.seed = seed
         self.use_rank_hint = use_rank_hint
-        self.retriever = retriever or PopularityRecommender()
+        self.retriever_type = retriever_type
+
+        # Resolve retriever: explicit param takes priority over type string.
+        if retriever is not None:
+            self.retriever = retriever
+        elif retriever_type == "cf":
+            from src.models.cf import CFRecommender
+            self.retriever = CFRecommender()
+        else:
+            self.retriever = PopularityRecommender()
 
         # item_idx -> activity_type label (e.g. "forumng")
         self._activity_label: dict[int, str] = {}
@@ -108,11 +118,15 @@ class LLMRecommender(Recommender):
             self._activity_label.get(i, "unknown") for i in recent
         ]
 
+        # "Last 5" recency summary for the enhanced prompt.
+        last_5_labels = ", ".join(history_labels[-5:]) if history_labels else "none"
+
         # Map candidate item_idx to a short tag the LLM will echo back.
         cand_tags = {f"C{i:02d}": item for i, item in enumerate(candidates)}
         if self.use_rank_hint:
             cand_descriptions = [
-                f"{tag}: {self._activity_label.get(item, 'unknown')} (popularity rank {idx+1} of {len(candidates)})"
+                f"{tag}: {self._activity_label.get(item, 'unknown')} "
+                f"(popularity rank {idx + 1} of {len(candidates)})"
                 for idx, (tag, item) in enumerate(cand_tags.items())
             ]
         else:
@@ -122,12 +136,17 @@ class LLMRecommender(Recommender):
             ]
 
         prompt = (
-            "You are a learning-activity recommender for an online university course.\n"
+            "You are a learning-activity recommender for an online university course.\n\n"
             "A student's recent activity sequence (oldest → newest):\n"
             f"  {', '.join(history_labels)}\n\n"
-            "Candidate next activities to rerank (tag: type):\n"
+            f"Recent pattern (last 5): {last_5_labels}\n\n"
+            "Candidate next activities to rerank:\n"
             + "\n".join(f"  {d}" for d in cand_descriptions)
-            + f"\n\nRerank all {len(candidates)} candidates from most to least relevant "
+            + "\n\nConsider:\n"
+            "1. What activity type naturally follows the student's recent pattern\n"
+            "2. The popularity rank indicates how commonly students engage with each activity\n"
+            "3. Activities similar to recent ones may be more relevant\n\n"
+            f"Rerank all {len(candidates)} candidates from most to least relevant "
             "for this student's NEXT click.\n"
             "Reply with ONLY a JSON array of the tags in your preferred order, "
             'e.g. ["C03","C00","C11",...]. No other text.'
@@ -135,11 +154,24 @@ class LLMRecommender(Recommender):
 
         raw = self._call_api(prompt)
         if raw is None:
-            # Fallback: return candidates in popularity order.
+            # Fallback: return candidates in retriever order.
             return candidates
 
         try:
-            tag_order: list[str] = json.loads(raw)
+            # Strip markdown fencing if present.
+            text = raw.strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                text = "\n".join(lines).strip()
+
+            # Extract JSON array brackets for robust parsing.
+            start = text.find("[")
+            end = text.rfind("]")
+            if start != -1 and end != -1:
+                text = text[start:end + 1]
+
+            tag_order: list[str] = json.loads(text)
             reranked = [cand_tags[t] for t in tag_order if t in cand_tags]
             # Append any candidates the LLM missed (preserve coverage).
             seen = set(reranked)

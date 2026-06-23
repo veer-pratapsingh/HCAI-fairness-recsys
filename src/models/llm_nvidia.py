@@ -30,18 +30,32 @@ class NvidiaLLMRecommender(Recommender):
     def __init__(
         self,
         api_key: str | None = None,
-        n_candidates: int = 20,
+        n_candidates: int = 50,
         max_history: int = 10,
         model: str = _DEFAULT_MODEL,
         seed: int = 0,
+        use_rank_hint: bool = True,
+        retriever: Recommender | None = None,
+        retriever_type: str = "popularity",
     ) -> None:
         self.api_key = api_key or os.environ.get("NVIDIA_API_KEY", "")
         self.n_candidates = n_candidates
         self.max_history = max_history
         self.model = model
         self.seed = seed
+        self.use_rank_hint = use_rank_hint
+        self.retriever_type = retriever_type
 
-        self._pop: PopularityRecommender = PopularityRecommender()
+        # Resolve retriever: explicit param takes priority over type string.
+        if retriever is not None:
+            self.retriever = retriever
+        elif retriever_type == "cf":
+            from src.models.cf import CFRecommender
+            self.retriever = CFRecommender()
+        else:
+            self.retriever = PopularityRecommender()
+
+        # item_idx -> activity_type label (e.g. "forumng")
         self._activity_label: dict[int, str] = {}
         self._client = None
 
@@ -50,7 +64,7 @@ class NvidiaLLMRecommender(Recommender):
     # ------------------------------------------------------------------
 
     def fit(self, splits_df: pd.DataFrame) -> "NvidiaLLMRecommender":
-        self._pop.fit(splits_df)
+        self.retriever.fit(splits_df)
 
         from src.utils import paths
         vocab = pd.read_parquet(paths.ITEM_VOCAB_PARQUET)
@@ -71,7 +85,7 @@ class NvidiaLLMRecommender(Recommender):
     # ------------------------------------------------------------------
 
     def recommend(self, history: list[int], k: int, context: Context) -> list[int]:
-        candidates = self._pop.recommend(history, self.n_candidates, context)
+        candidates = self.retriever.recommend(history, self.n_candidates, context)
         if not candidates:
             return []
 
@@ -91,19 +105,35 @@ class NvidiaLLMRecommender(Recommender):
             self._activity_label.get(i, "unknown") for i in recent
         ]
 
+        # "Last 5" recency summary for the enhanced prompt.
+        last_5_labels = ", ".join(history_labels[-5:]) if history_labels else "none"
+
+        # Map candidate item_idx to a short tag the LLM will echo back.
         cand_tags = {f"C{i:02d}": item for i, item in enumerate(candidates)}
-        cand_descriptions = [
-            f"{tag}: {self._activity_label.get(item, 'unknown')}"
-            for tag, item in cand_tags.items()
-        ]
+        if self.use_rank_hint:
+            cand_descriptions = [
+                f"{tag}: {self._activity_label.get(item, 'unknown')} "
+                f"(popularity rank {idx + 1} of {len(candidates)})"
+                for idx, (tag, item) in enumerate(cand_tags.items())
+            ]
+        else:
+            cand_descriptions = [
+                f"{tag}: {self._activity_label.get(item, 'unknown')}"
+                for tag, item in cand_tags.items()
+            ]
 
         prompt = (
-            "You are a learning-activity recommender for an online university course.\n"
+            "You are a learning-activity recommender for an online university course.\n\n"
             "A student's recent activity sequence (oldest → newest):\n"
             f"  {', '.join(history_labels)}\n\n"
-            "Candidate next activities to rerank (tag: type):\n"
+            f"Recent pattern (last 5): {last_5_labels}\n\n"
+            "Candidate next activities to rerank:\n"
             + "\n".join(f"  {d}" for d in cand_descriptions)
-            + f"\n\nRerank all {len(candidates)} candidates from most to least relevant "
+            + "\n\nConsider:\n"
+            "1. What activity type naturally follows the student's recent pattern\n"
+            "2. The popularity rank indicates how commonly students engage with each activity\n"
+            "3. Activities similar to recent ones may be more relevant\n\n"
+            f"Rerank all {len(candidates)} candidates from most to least relevant "
             "for this student's NEXT click.\n"
             "Reply with ONLY a JSON array of the tags in your preferred order, "
             'e.g. ["C03","C00","C11",...]. No other text.'

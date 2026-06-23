@@ -1,16 +1,22 @@
-"""LLM recommender variant using Google Gemini API.
+"""LLM recommender variant using OpenAI (ChatGPT) API.
 
 Same retrieve-then-rerank strategy as llm.py (DeepSeek), but calls the
-Gemini REST API instead. This lets us compare two different LLM backends
-on the same task.
+OpenAI API via the official ``openai`` Python SDK.  This lets us compare
+multiple LLM backends on the same task.
+
+Features over the base LLM variant:
+  - Supports both CF and Popularity retrievers via ``retriever_type``.
+  - Enhanced prompt with "last 5" recency pattern and rank hints.
+  - Robust JSON parsing that strips markdown fencing and extracts brackets.
 
 Usage:
-    python -m experiments.run_gemini_llm --seeds 0,1,2,3,4
+    python -m experiments.run_openai_llm --seeds 0,1,2,3,4
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 import pandas as pd
@@ -18,14 +24,13 @@ import pandas as pd
 from src.models.base import Context, Recommender
 from src.models.popularity import PopularityRecommender
 
-_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-_DEFAULT_MODEL = "gemini-2.0-flash"
+_DEFAULT_MODEL = "gpt-4o-mini"
 
 
-class GeminiLLMRecommender(Recommender):
-    """Retrieve-then-Rerank using Google Gemini API."""
+class OpenAILLMRecommender(Recommender):
+    """Retrieve-then-Rerank using OpenAI chat completions."""
 
-    name = "llm_gemini"
+    name = "llm_openai"
 
     def __init__(
         self,
@@ -36,9 +41,9 @@ class GeminiLLMRecommender(Recommender):
         seed: int = 0,
         use_rank_hint: bool = True,
         retriever: Recommender | None = None,
-        retriever_type: str = "popularity",
+        retriever_type: str = "cf",
     ) -> None:
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.n_candidates = n_candidates
         self.max_history = max_history
         self.model = model
@@ -57,19 +62,26 @@ class GeminiLLMRecommender(Recommender):
 
         # item_idx -> activity_type label (e.g. "forumng")
         self._activity_label: dict[int, str] = {}
+        self._client = None
 
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
 
-    def fit(self, splits_df: pd.DataFrame) -> "GeminiLLMRecommender":
+    def fit(self, splits_df: pd.DataFrame) -> "OpenAILLMRecommender":
+        """Fit the underlying retriever and initialise the OpenAI client."""
         self.retriever.fit(splits_df)
 
+        # Build item_idx -> activity_type mapping from the vocab parquet.
         from src.utils import paths
         vocab = pd.read_parquet(paths.ITEM_VOCAB_PARQUET)
         self._activity_label = dict(
             zip(vocab["item_idx"].tolist(), vocab["activity_type"].tolist())
         )
+
+        # Initialise the OpenAI client (standard endpoint).
+        from openai import OpenAI
+        self._client = OpenAI(api_key=self.api_key)
         return self
 
     # ------------------------------------------------------------------
@@ -77,10 +89,12 @@ class GeminiLLMRecommender(Recommender):
     # ------------------------------------------------------------------
 
     def recommend(self, history: list[int], k: int, context: Context) -> list[int]:
+        # Step 1: retrieve candidates.
         candidates = self.retriever.recommend(history, self.n_candidates, context)
         if not candidates:
             return []
 
+        # Step 2: rerank with LLM.
         reranked = self._llm_rerank(history, candidates, k)
         return reranked[:k]
 
@@ -91,7 +105,8 @@ class GeminiLLMRecommender(Recommender):
     def _llm_rerank(
         self, history: list[int], candidates: list[int], k: int
     ) -> list[int]:
-        """Ask Gemini to rerank candidates and return item indices."""
+        """Ask OpenAI to rerank `candidates` and return item indices."""
+        # Represent history as last `max_history` activity-type labels.
         recent = history[-self.max_history:]
         history_labels = [
             self._activity_label.get(i, "unknown") for i in recent
@@ -133,6 +148,7 @@ class GeminiLLMRecommender(Recommender):
 
         raw = self._call_api(prompt)
         if raw is None:
+            # Fallback: return candidates in retriever order.
             return candidates
 
         try:
@@ -151,6 +167,7 @@ class GeminiLLMRecommender(Recommender):
 
             tag_order: list[str] = json.loads(text)
             reranked = [cand_tags[t] for t in tag_order if t in cand_tags]
+            # Append any candidates the LLM missed (preserve coverage).
             seen = set(reranked)
             for item in candidates:
                 if item not in seen:
@@ -160,42 +177,23 @@ class GeminiLLMRecommender(Recommender):
             return candidates
 
     def _call_api(self, prompt: str, retries: int = 3) -> str | None:
-        """POST to Gemini generateContent; return raw text or None."""
-        try:
-            import urllib.request
-        except ImportError:
+        """Call OpenAI chat completions via SDK; return content string or None."""
+        if self._client is None:
             return None
-
-        url = (
-            f"{_GEMINI_BASE}/models/{self.model}:generateContent"
-            f"?key={self.api_key}"
-        )
-
-        payload = json.dumps({
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 256,
-            },
-        }).encode()
-
-        headers = {"Content-Type": "application/json"}
 
         for attempt in range(retries):
             try:
-                req = urllib.request.Request(
-                    url, data=payload, headers=headers, method="POST",
+                completion = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=256,
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    body = json.loads(resp.read().decode())
-                    return (
-                        body["candidates"][0]["content"]["parts"][0]["text"]
-                        .strip()
-                    )
+                return completion.choices[0].message.content.strip()
             except Exception as exc:
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                 else:
-                    print(f"[Gemini LLM] API error after {retries} retries: {exc}")
+                    print(f"[OpenAI LLM] API error after {retries} retries: {exc}")
                     return None
         return None
