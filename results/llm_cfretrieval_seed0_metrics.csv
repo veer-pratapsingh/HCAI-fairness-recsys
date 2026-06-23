@@ -1,0 +1,2 @@
+model,seed,Recall@10,NDCG@10,MRR,n_sessions,run_time_sec
+llm_cfretrieval,0,0.034,0.015086604427324799,0.009343650793650793,500,629.6396725177765

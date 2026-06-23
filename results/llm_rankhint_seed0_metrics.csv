@@ -1,0 +1,2 @@
+model,seed,Recall@10,NDCG@10,MRR,n_sessions,run_time_sec
+llm_rankhint,0,0.028,0.012027451424389294,0.007323809523809523,500,645.7544157505035

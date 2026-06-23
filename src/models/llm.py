@@ -50,14 +50,17 @@ class LLMRecommender(Recommender):
         max_history: int = 10,
         model: str = _DEFAULT_MODEL,
         seed: int = 0,
+        use_rank_hint: bool = False,
+        retriever: Recommender | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self.n_candidates = n_candidates
         self.max_history = max_history
         self.model = model
         self.seed = seed
+        self.use_rank_hint = use_rank_hint
+        self.retriever = retriever or PopularityRecommender()
 
-        self._pop: PopularityRecommender = PopularityRecommender()
         # item_idx -> activity_type label (e.g. "forumng")
         self._activity_label: dict[int, str] = {}
 
@@ -66,8 +69,8 @@ class LLMRecommender(Recommender):
     # ------------------------------------------------------------------
 
     def fit(self, splits_df: pd.DataFrame) -> "LLMRecommender":
-        # Fit the underlying popularity retriever.
-        self._pop.fit(splits_df)
+        # Fit the underlying retriever.
+        self.retriever.fit(splits_df)
 
         # Build item_idx -> activity_type mapping from the vocab parquet.
         from src.utils import paths
@@ -82,8 +85,8 @@ class LLMRecommender(Recommender):
     # ------------------------------------------------------------------
 
     def recommend(self, history: list[int], k: int, context: Context) -> list[int]:
-        # Step 1: retrieve candidates via Popularity.
-        candidates = self._pop.recommend(history, self.n_candidates, context)
+        # Step 1: retrieve candidates.
+        candidates = self.retriever.recommend(history, self.n_candidates, context)
         if not candidates:
             return []
 
@@ -107,10 +110,16 @@ class LLMRecommender(Recommender):
 
         # Map candidate item_idx to a short tag the LLM will echo back.
         cand_tags = {f"C{i:02d}": item for i, item in enumerate(candidates)}
-        cand_descriptions = [
-            f"{tag}: {self._activity_label.get(item, 'unknown')}"
-            for tag, item in cand_tags.items()
-        ]
+        if self.use_rank_hint:
+            cand_descriptions = [
+                f"{tag}: {self._activity_label.get(item, 'unknown')} (popularity rank {idx+1} of {len(candidates)})"
+                for idx, (tag, item) in enumerate(cand_tags.items())
+            ]
+        else:
+            cand_descriptions = [
+                f"{tag}: {self._activity_label.get(item, 'unknown')}"
+                for tag, item in cand_tags.items()
+            ]
 
         prompt = (
             "You are a learning-activity recommender for an online university course.\n"
