@@ -208,6 +208,10 @@ All metrics are reported as **mean $\pm$ standard deviation** across 5 seeds:
 *   **CF is the most accurate baseline**, outperforming SASRec (Recall@10: 4.19% vs 4.10%). A Wilcoxon signed-rank test comparing CF and SASRec yielded a p-value of **0.0625** (the minimum possible for $N=5$), showing consistent superiority of CF.
 *   **LLMs underperform classical models**: DeepSeek retrieve-then-rerank gets a mean Recall@10 of 2.96% with high variance across seeds.
 
+![Demographic Recall Gaps (RQ3)](results/rq3_attribute_recall_gaps.png)
+*Figure 1: Demographic recall gaps across gender, age band, disability status, and socioeconomic status (IMD) for our baseline models.*
+
+
 ### 7.2 Parallel LLM Benchmarking Comparison
 We swept parallel LLM backends over seeds 0-4 on the 500-session sample:
 - **Gemini-2.0-flash**: **3.72% $\pm$ 0.93%** Recall@10, Mean IMD EOD: **+1.52%**. Seed 1 reached **5.00%**.
@@ -237,6 +241,19 @@ We swept mitigation parameters for socioeconomic status (`imd_binary`):
 - **Adversarial SASRec ($\lambda_{\text{adv}} = 0.05$)**: Provides a group-invariant representation but is sensitive to hyperparameter scales.
 - **Counterfactual Reranking**: Achieves balanced exposure across group memberships.
 - **Calibrated MMR Reranking ($\lambda_{\text{cal}} = 0.5$)**: Yields the highest Intra-List Diversity (ILD = 0.51) and maintains controlled KL-divergence.
+
+#### Visual Trade-offs and Recall Distributions
+
+Below are the accuracy-vs-fairness curves and mitigation comparisons generated across our seed sweeps, which are integrated into our final findings:
+
+![Recall@10 Mitigation Comparison](results/mitigation_recall_bar.png)
+*Figure 2: Accuracy comparison (Recall@10) across popularity, CF, base SASRec, Fair Loss sweeps, and Group Rerank sweeps.*
+
+![Accuracy vs Fairness Trade-off Curve](results/accuracy_vs_fairness_tradeoff.png)
+*Figure 3: Pareto trade-off curve of Recommendation Accuracy (Recall@10) vs Socioeconomic Bias (IMD EOD) across Fair Loss and post-hoc Group Reranking sweeps.*
+
+![Accuracy vs Fairness Trade-off (Hybrid Sweeps)](results/accuracy_vs_fairness_tradeoff_hybrid.png)
+*Figure 4: Pareto trade-off curve comparing hybrid mitigations (blending Fair Loss and post-hoc Group Reranking) against base models.*
 
 ---
 
