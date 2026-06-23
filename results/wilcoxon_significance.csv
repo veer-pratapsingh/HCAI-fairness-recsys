@@ -1,0 +1,6 @@
+comparison,metric,wilcoxon_stat,p_value
+cf_vs_sasrec,Recall@10,0.0,0.0625
+sasrec_vs_fair_lam1.0,Recall@10,0.0,0.0625
+sasrec_vs_fair_lam1.0_eod,imd_EOD,0.0,0.0625
+sasrec_vs_rerank_a0.7,Recall@10,0.0,0.0625
+sasrec_vs_rerank_a0.7_eod,imd_EOD,0.0,0.0625
