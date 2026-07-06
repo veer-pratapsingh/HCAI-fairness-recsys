@@ -117,6 +117,14 @@ def main():
         res, grp, fair = audit_model(model, test_splits, sequences, seed)
         res["run_time_sec"] = time.time() - t0
 
+        fb_rate = getattr(model, "fallback_rate", None)
+        if fb_rate is not None:
+            print(f"[gemini][seed {seed}] fallback_rate={fb_rate:.1%} "
+                  f"({model.n_fallbacks}/{model.n_calls} calls)")
+            res["fallback_rate"] = fb_rate
+        for i, r in enumerate(model.sample_reasoning(3)):
+            res[f"reasoning_{i}"] = r
+
         print(f"  Recall@10={res['Recall@10']:.4f}  NDCG@10={res['NDCG@10']:.4f}  MRR={res['MRR']:.4f}")
         print(f"  Time: {res['run_time_sec']:.1f}s")
 
