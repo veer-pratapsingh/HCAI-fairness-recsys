@@ -22,12 +22,13 @@ import time
 import pandas as pd
 
 from src.models.base import Context, Recommender
+from src.models.llm_base import LLMRerankMixin
 from src.models.popularity import PopularityRecommender
 
 _DEFAULT_MODEL = "gpt-4o-mini"
 
 
-class OpenAILLMRecommender(Recommender):
+class OpenAILLMRecommender(LLMRerankMixin, Recommender):
     """Retrieve-then-Rerank using OpenAI chat completions."""
 
     name = "llm_openai"
@@ -105,78 +106,10 @@ class OpenAILLMRecommender(Recommender):
     def _llm_rerank(
         self, history: list[int], candidates: list[int], k: int
     ) -> list[int]:
-        """Ask OpenAI to rerank `candidates` and return item indices."""
-        # Represent history as last `max_history` activity-type labels.
-        recent = history[-self.max_history:]
-        history_labels = [
-            self._activity_label.get(i, "unknown") for i in recent
-        ]
-
-        # "Last 5" recency summary for the enhanced prompt.
-        last_5_labels = ", ".join(history_labels[-5:]) if history_labels else "none"
-
-        # Map candidate item_idx to a short tag the LLM will echo back.
-        cand_tags = {f"C{i:02d}": item for i, item in enumerate(candidates)}
-        if self.use_rank_hint:
-            cand_descriptions = [
-                f"{tag}: {self._activity_label.get(item, 'unknown')} "
-                f"(popularity rank {idx + 1} of {len(candidates)})"
-                for idx, (tag, item) in enumerate(cand_tags.items())
-            ]
-        else:
-            cand_descriptions = [
-                f"{tag}: {self._activity_label.get(item, 'unknown')}"
-                for tag, item in cand_tags.items()
-            ]
-
-        prompt = (
-            "You are a learning-activity recommender for an online university course.\n\n"
-            "A student's recent activity sequence (oldest → newest):\n"
-            f"  {', '.join(history_labels)}\n\n"
-            f"Recent pattern (last 5): {last_5_labels}\n\n"
-            "Candidate next activities to rerank:\n"
-            + "\n".join(f"  {d}" for d in cand_descriptions)
-            + "\n\nConsider:\n"
-            "1. What activity type naturally follows the student's recent pattern\n"
-            "2. The popularity rank indicates how commonly students engage with each activity\n"
-            "3. Activities similar to recent ones may be more relevant\n\n"
-            f"Rerank all {len(candidates)} candidates from most to least relevant "
-            "for this student's NEXT click.\n"
-            "Reply with ONLY a JSON array of the tags in your preferred order, "
-            'e.g. ["C03","C00","C11",...]. No other text.'
-        )
-
-        raw = self._call_api(prompt)
-        if raw is None:
-            # Fallback: return candidates in retriever order.
-            return candidates
-
-        try:
-            # Strip markdown fencing if present.
-            text = raw.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
-                text = "\n".join(lines).strip()
-
-            # Extract JSON array brackets for robust parsing.
-            start = text.find("[")
-            end = text.rfind("]")
-            if start != -1 and end != -1:
-                text = text[start:end + 1]
-
-            tag_order: list[str] = json.loads(text)
-            reranked = [cand_tags[t] for t in tag_order if t in cand_tags]
-            # Append any candidates the LLM missed (preserve coverage).
-            seen = set(reranked)
-            for item in candidates:
-                if item not in seen:
-                    reranked.append(item)
-            return reranked
-        except Exception:
-            return candidates
-
-    def _call_api(self, prompt: str, retries: int = 3) -> str | None:
+        """Delegate to the shared CoT-aware, fallback-tracking mixin."""
+        return self._rerank_with_llm(history, candidates)
+    
+    def _call_api(self, prompt: str, retries: int = 4) -> str | None:
         """Call OpenAI chat completions via SDK; return content string or None."""
         if self._client is None:
             return None
@@ -187,10 +120,16 @@ class OpenAILLMRecommender(Recommender):
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
-                    max_tokens=256,
+                    max_tokens=512,
                 )
                 return completion.choices[0].message.content.strip()
             except Exception as exc:
+                msg = str(exc)
+                # Rate limit (429): back off longer before retrying.
+                if "429" in msg or "rate" in msg.lower():
+                    if attempt < retries - 1:
+                        time.sleep(5 * (attempt + 1))  # 5s, 10s, 15s
+                        continue
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                 else:

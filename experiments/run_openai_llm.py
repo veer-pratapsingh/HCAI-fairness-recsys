@@ -128,6 +128,15 @@ def main():
         res, grp, fair = audit_model(model, test_splits, sequences, seed)
         res["run_time_sec"] = time.time() - t0
 
+        # --- fallback + CoT diagnostics (added for credibility fix) ---
+        fb_rate = getattr(model, "fallback_rate", None)
+        if fb_rate is not None:
+            print(f"[openai][seed {seed}] fallback_rate={fb_rate:.1%} "
+                  f"({model.n_fallbacks}/{model.n_calls} calls)")
+            res["fallback_rate"] = fb_rate
+        for i, r in enumerate(model.sample_reasoning(3)):
+            res[f"reasoning_{i}"] = r
+
         print(f"  Recall@10={res['Recall@10']:.4f}  NDCG@10={res['NDCG@10']:.4f}  MRR={res['MRR']:.4f}")
         print(f"  Time: {res['run_time_sec']:.1f}s")
 
@@ -144,7 +153,8 @@ def main():
     print("\n===== OpenAI LLM Summary =====")
     for metric in ["Recall@10", "NDCG@10", "MRR"]:
         vals = df[metric].to_numpy()
-        print(f"  {metric}: {np.mean(vals):.4f} ± {np.std(vals, ddof=1):.4f}")
+        std = np.std(vals, ddof=1) if len(vals) > 1 else 0.0
+        print(f"  {metric}: {np.mean(vals):.4f} ± {std:.4f}")
 
     print("\nOpenAI LLM experiment complete.", flush=True)
 
