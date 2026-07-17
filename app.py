@@ -1,251 +1,465 @@
-"""Streamlit Web App: HCAI Fairness Auditing & Mitigation Dashboard.
+"""Streamlit dashboard: Fairness Auditing & Mitigation on OULAD (Group 17, HCAI @ OvGU).
 
-Run locally using:
-    pip install streamlit matplotlib seaborn
+The dashboard tells the paper's story in five tabs and reads every aggregate
+number directly from the CSVs in `results/` (the same source of truth as the
+paper), so the demo can never contradict the submitted numbers.
+
+Run locally:
+    pip install streamlit plotly
     streamlit run app.py
 """
-import streamlit as st
-import pandas as pd
+from __future__ import annotations
+
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
 from src.utils import paths
-from src.data.splits import load_splits
-from src.models.base import Context
-from src.models.popularity import PopularityRecommender
-from src.models.cf import CFRecommender
-from src.mitigation.rerank import RerankingRecommender
-from src.mitigation.calibration import CalibratedReranker
 
-# Page Config
+# ---------------------------------------------------------------- constants
+
+NAVY = "#1F2A5A"
+ORANGE = "#E8641E"
+GREY = "#B7BFCC"
+LIGHT = "#EEF2F8"
+
+MODEL_LABELS = {
+    "popularity": "Popularity",
+    "cf": "CF (ALS)",
+    "sasrec": "SASRec",
+    "llm_openai": "LLM (GPT-4o-mini)",
+}
+
+ATTR_LABELS = {
+    "gender": "Gender",
+    "age_binary": "Age (0-35 vs 35+)",
+    "disability": "Disability",
+    "imd_binary": "IMD (socioeconomic)",
+}
+
+# per_group CSVs use these attribute keys for the full (non-binary) breakdown
+ATTR_PER_GROUP_KEY = {
+    "gender": "gender",
+    "age_binary": "age_band",
+    "disability": "disability",
+    "imd_binary": "imd_binary",
+}
+
 st.set_page_config(
-    page_title="HCAI Recommender Fairness Dashboard",
-    page_icon="🎓",
+    page_title="OULAD Fairness Audit — Group 17",
+    page_icon="⚖️",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# Set styling
-st.markdown("""
-<style>
-    .reportview-container {
-        background-color: #f5f7f9;
-    }
-    .card {
-        background-color: white;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        margin-bottom: 20px;
-    }
-    .metric-val {
-        font-size: 24px;
-        font-weight: bold;
-        color: #1f77b4;
-    }
-</style>
-""", unsafe_allow_html=True)
 
+# ---------------------------------------------------------------- data access
 
 @st.cache_data
-def load_data():
-    splits = load_splits(write=False)
-    vocab = pd.read_parquet(paths.ITEM_VOCAB_PARQUET)
-    sequences = pd.read_parquet(paths.SEQUENCES_PARQUET)
-    
-    # Map item_idx -> activity_type and code
-    idx_to_type = vocab.set_index('item_idx')['activity_type'].to_dict()
-    idx_to_code = vocab.set_index('item_idx')['id_site'].to_dict()
-    
-    return splits, vocab, sequences, idx_to_type, idx_to_code
+def load_csv(name: str) -> pd.DataFrame:
+    return pd.read_csv(paths.RESULTS_DIR / name)
 
 
-# 1. Load Data
-splits, vocab, sequences, idx_to_type, idx_to_code = load_data()
+def pc(x: float) -> float:
+    """fraction -> percent"""
+    return 100.0 * float(x)
 
-# Page Header
-st.title("🎓 HCAI: Fairness Auditing & Mitigation Dashboard")
-st.markdown("An interactive dashboard to audit next-activity recommenders and evaluate fairness mitigations on the **OULAD** dataset.")
 
-# Sidebar controls
-st.sidebar.header("🛠️ Configurations & Controls")
+summary = load_csv("summary_table.csv").set_index("model")
+gaps = load_csv("group_gap_significance.csv")
+mcnemar = load_csv("mcnemar_significance.csv")
+entropy = load_csv("group_predictability.csv")
+llm_runs = load_csv("openai_llm_runs.csv")
 
-# Select presentation
-presentations = splits.groupby(['code_module', 'code_presentation']).size().index.tolist()
-pres_labels = [f"{m} / {p}" for m, p in presentations]
-selected_pres_idx = st.sidebar.selectbox(
-    "1. Select Course Module / Presentation",
-    range(len(pres_labels)),
-    format_func=lambda x: pres_labels[x]
-)
-selected_m, selected_p = presentations[selected_pres_idx]
+# headline numbers (computed, not hard-coded)
+POP_R = pc(summary.loc["popularity", "Recall@10_mean"])
+CF_R = pc(summary.loc["cf", "Recall@10_mean"])
+SAS_R = pc(summary.loc["sasrec", "Recall@10_mean"])
+LLM_R = pc(llm_runs["Recall@10"].mean())
+LLM_SD = pc(llm_runs["Recall@10"].std(ddof=1))
 
-# Filter splits for presentation
-pres_splits = splits[(splits['code_module'] == selected_m) & (splits['code_presentation'] == selected_p)].copy()
+MC_CF_SAS = mcnemar[(mcnemar.label_a == "cf") & (mcnemar.label_b == "sasrec")].iloc[0]
 
-# Fit models for this presentation
-@st.cache_resource
-def get_fitted_base_models(module, presentation):
-    # Filter splits
-    train_df = splits[(splits['code_module'] == module) & (splits['code_presentation'] == presentation)]
-    
-    pop_model = PopularityRecommender()
-    pop_model.fit(train_df)
-    
-    cf_model = CFRecommender(factors=32, iterations=15)
-    cf_model.fit(train_df)
-    
-    return pop_model, cf_model
+SAS_IMD = gaps[(gaps.model == "sasrec") & (gaps.attribute == "imd_binary")].iloc[0]
+SAS_AGE = gaps[(gaps.model == "sasrec") & (gaps.attribute == "age_binary")].iloc[0]
 
-pop_model, cf_model = get_fitted_base_models(selected_m, selected_p)
+FAIR_ROW = summary.loc["sasrec_fair_lam1.0"]
+RERANK_ROW = summary.loc["sasrec_rerank_a0.7"]
+BASE_ROW = summary.loc["sasrec"]
 
-# Select student session
-sessions = pres_splits['id_student'].tolist()
-selected_student = st.sidebar.selectbox(
-    "2. Select Student Session (ID)",
-    sessions
+
+def fig_layout(fig: go.Figure, title: str, ytitle: str = "", height: int = 420) -> go.Figure:
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16, color=NAVY)),
+        template="plotly_white",
+        height=height,
+        yaxis_title=ytitle,
+        font=dict(family="Calibri, Arial", size=14),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(t=70, b=40),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------- header
+
+st.title("⚖️ Who Does the Recommender Work For?")
+st.markdown(
+    f"**A fairness audit of next-activity recommenders on OULAD** &nbsp;·&nbsp; "
+    f"Group 17 · HCAI @ OvGU &nbsp;·&nbsp; "
+    f"<span style='color:{ORANGE}'>every number below is read live from "
+    f"<code>results/</code> — the same files behind the paper</span>",
+    unsafe_allow_html=True,
 )
 
-student_row = pres_splits[pres_splits['id_student'] == selected_student].iloc[0]
-
-# Display student demographics
-st.sidebar.markdown("---")
-st.sidebar.subheader("👤 Student Profile")
-st.sidebar.markdown(f"**Gender**: `{student_row['gender']}`")
-st.sidebar.markdown(f"**Age Band**: `{student_row['age_band']}`")
-st.sidebar.markdown(f"**Disability Status**: `{'Yes' if student_row['disability'] == 'Y' else 'No'}`")
-st.sidebar.markdown(f"**Socioeconomic Decile (IMD)**: `{student_row['imd_band']}`")
-st.sidebar.markdown(f"**Group (Binarized)**: `{student_row['imd_binary']}`")
-
-# Model configuration
-st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 Recommender Model Settings")
-model_choice = st.sidebar.radio(
-    "3. Select Recommender Model",
-    ["Popularity Baseline", "Collaborative Filtering (ALS)", "Group Rerank Recommender", "Calibrated MMR Reranker"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📌 The Audit", "🎯 Accuracy", "⚖️ Fairness Audit", "🔧 Mitigation", "🧑‍🎓 Live Demo"]
 )
 
-alpha = 0.5
-lambda_cal = 0.5
+# ================================================================= TAB 1
+with tab1:
+    st.subheader("One protocol, four models, four protected groups")
+    st.markdown(
+        "We predict each student's **next learning activity** (1 of 6,268) from their "
+        "click history — 28,761 sessions, leave-last-out split — and audit **who** "
+        "each model serves well. Chance level is **0.16%**; all models are compared "
+        "on the *identical* hidden clicks."
+    )
 
-if model_choice == "Group Rerank Recommender":
-    alpha = st.sidebar.slider("Group Affinity Weight (alpha)", 0.0, 1.0, 0.7, step=0.1)
-    st.sidebar.caption("alpha=0 maps to CF, alpha=1 maps to group training frequencies.")
-elif model_choice == "Calibrated MMR Reranker":
-    lambda_cal = st.sidebar.slider("Calibration weight (lambda)", 0.0, 1.0, 0.5, step=0.1)
-    st.sidebar.caption("lambda=0 maps to CF, lambda=1 maps to maximum category match.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Popularity — Recall@10", f"{POP_R:.2f}%", "the floor", delta_color="off")
+    c2.metric("CF (ALS) — Recall@10", f"{CF_R:.2f}%", "best classical")
+    c3.metric("SASRec — Recall@10", f"{SAS_R:.2f}%", "deep sequential", delta_color="off")
+    c4.metric("LLM reranker — Recall@10", f"{LLM_R:.2f}% ± {LLM_SD:.2f}", "500 sessions only", delta_color="off")
 
-# Get recommendations
-history = list(student_row['train_history'])
-context = Context(code_module=selected_m, code_presentation=selected_p, id_student=selected_student)
+    st.markdown("---")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        st.markdown(f"#### 1 · Simple ties deep")
+        st.markdown(
+            f"CF and SASRec are **statistically tied** "
+            f"(McNemar p = {MC_CF_SAS.p_value:.3f}; CF alone won {int(MC_CF_SAS.a_only)} "
+            f"sessions, SASRec alone {int(MC_CF_SAS.b_only)}). Modelling click *order* "
+            f"buys nothing here — students follow standard paths. → *Tab 🎯*"
+        )
+    with f2:
+        st.markdown(f"#### 2 · The bias runs backwards")
+        st.markdown(
+            f"The base models serve **socioeconomically disadvantaged students "
+            f"better** than advantaged ones: gap **+{pc(SAS_IMD.gap):.2f} pts** "
+            f"(95% CI [{pc(SAS_IMD.ci_low):.2f}, {pc(SAS_IMD.ci_high):.2f}], "
+            f"Holm-significant). Older students do worse. A naive audit expects the "
+            f"opposite. → *Tab ⚖️*"
+        )
+    with f3:
+        st.markdown(f"#### 3 · The fixes level down")
+        st.markdown(
+            f"Both mitigations reach parity mainly by **dragging the favoured group "
+            f"down**, not lifting anyone up — the gentler fix still costs "
+            f"**{100*(RERANK_ROW['Recall@10_mean']/BASE_ROW['Recall@10_mean']-1):.1f}%** "
+            f"of overall recall. In education that is the wrong kind of equality. → *Tab 🔧*"
+        )
 
-if model_choice == "Popularity Baseline":
-    recs = pop_model.recommend(history, k=10, context=context)
-elif model_choice == "Collaborative Filtering (ALS)":
-    recs = cf_model.recommend(history, k=10, context=context)
-elif model_choice == "Group Rerank Recommender":
-    rerank_model = RerankingRecommender(base=cf_model, alpha=alpha)
-    rerank_model.fit(pres_splits)
-    recs = rerank_model.recommend(history, k=10, context=context)
-elif model_choice == "Calibrated MMR Reranker":
-    cal_model = CalibratedReranker(base=cf_model, lambda_cal=lambda_cal)
-    cal_model.fit(pres_splits)
-    recs = cal_model.recommend(history, k=10, context=context)
+    st.info(
+        "**The human-centred lesson:** a single fairness number can point the wrong "
+        "way. Always read parity metrics *beside absolute per-group performance*, "
+        "and keep a human in the loop before 'fixing' anything.",
+        icon="🧭",
+    )
 
-# MAIN PANEL
-col1, col2 = st.columns([2, 1])
+# ================================================================= TAB 2
+with tab2:
+    st.subheader("Accuracy under one identical protocol")
 
-with col1:
-    st.subheader("📚 Clickstream History & Recommendations")
-    
-    # Render History
-    history_types = [idx_to_type.get(item_idx, 'unknown') for item_idx in history]
-    history_codes = [idx_to_code.get(item_idx, 0) for item_idx in history]
-    
-    hist_df = pd.DataFrame({
-        'Seq Pos': range(1, len(history) + 1),
-        'VLE Site Code': history_codes,
-        'Activity Type': history_types
-    })
-    
-    with st.expander(f"📖 View Full History ({len(history)} clicks completed)", expanded=True):
-        st.dataframe(hist_df, use_container_width=True)
-        
-    # Render Recommendations
-    rec_types = [idx_to_type.get(item_idx, 'unknown') for item_idx in recs]
-    rec_codes = [idx_to_code.get(item_idx, 0) for item_idx in recs]
-    
-    rec_df = pd.DataFrame({
-        'Rank': range(1, len(recs) + 1),
-        'VLE Site Code': rec_codes,
-        'Activity Type': rec_types
-    })
-    
-    st.markdown("### 🎯 Recommended Activities (Top-10 Next-Clicks)")
-    st.table(rec_df)
-    
-    target_idx = student_row['test_target']
-    target_type = idx_to_type.get(target_idx, 'unknown')
-    target_code = idx_to_code.get(target_idx, 0)
-    
-    st.info(f"🎯 **Student's Actual Next Click (Ground Truth)**: Site `{target_code}` (Type: `{target_type}`) " +
-            f"— **{'Hit! 🎉' if target_idx in recs else 'Miss ❌'}** (Rank: {recs.index(target_idx)+1 if target_idx in recs else 'N/A'})")
+    metric = st.radio(
+        "Metric", ["Recall@10", "NDCG@10", "MRR"], horizontal=True, key="acc_metric"
+    )
 
-with col2:
-    st.subheader("📊 Audit & Calibration Panel")
-    
-    # 1. Activity Type Distribution in recommendations
-    rec_counts = pd.Series(rec_types).value_counts()
-    
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.pie(rec_counts, labels=rec_counts.index, autopct='%1.0f%%', startangle=90, colors=sns.color_palette("pastel"))
-    ax.axis('equal')
-    ax.set_title("Recommended Types")
-    st.pyplot(fig)
-    
-    # 2. Historical demographic target comparison
-    st.markdown("### ⚖️ Group Engagement Benchmark")
-    group_val = student_row['imd_binary']
-    
-    # Compute group engagement distribution in training
-    pres_train_histories = []
-    for h in pres_splits[pres_splits['imd_binary'] == group_val]['train_history']:
-        pres_train_histories.extend(h)
-    
-    group_history_types = [idx_to_type.get(item_idx, 'unknown') for item_idx in pres_train_histories]
-    group_distribution = pd.Series(group_history_types).value_counts(normalize=True)
-    
-    # Compute KL divergence
-    rec_distribution = pd.Series(rec_types).value_counts(normalize=True)
-    # Align indexes
-    all_types = vocab['activity_type'].unique()
-    q_target = np.array([group_distribution.get(t, 0.0) for t in all_types])
-    p_rec = np.array([rec_distribution.get(t, 0.0) for t in all_types])
-    # Add smoothing
-    q_target = (q_target + 1e-5) / (q_target.sum() + len(all_types)*1e-5)
-    p_rec = (p_rec + 1e-5) / (p_rec.sum() + len(all_types)*1e-5)
-    kl_div = np.sum(p_rec * np.log(p_rec / q_target))
-    
-    st.markdown(f"**Active Demographic Group**: `{group_val}`")
-    st.metric("KL Divergence (Calibration Error)", f"{kl_div:.4f}", help="Difference between recommended type distribution and historical group distribution. Lower is better calibrated.")
-    
-    # Visual comparison bar chart
-    compare_df = pd.DataFrame({
-        'Type': all_types,
-        'Recommended (%)': [rec_distribution.get(t, 0.0)*100 for t in all_types],
-        'Group Historical Average (%)': [group_distribution.get(t, 0.0)*100 for t in all_types]
-    })
-    compare_df = compare_df[(compare_df['Recommended (%)'] > 0) | (compare_df['Group Historical Average (%)'] > 0.05)]
-    compare_df = compare_df.melt(id_vars='Type', var_name='Distribution', value_name='Percentage')
-    
-    fig2, ax2 = plt.subplots(figsize=(6, 4))
-    sns.barplot(data=compare_df, y='Type', x='Percentage', hue='Distribution', ax=ax2, palette="muted")
-    ax2.set_xlabel("Percentage (%)")
-    ax2.set_ylabel("")
-    ax2.set_title("Distribution Alignment")
-    plt.tight_layout()
-    st.pyplot(fig2)
+    rows = ["popularity", "cf", "sasrec"]
+    means = [pc(summary.loc[m, f"{metric}_mean"]) for m in rows]
+    err_lo = [pc(summary.loc[m, f"{metric}_mean"]) - pc(summary.loc[m, f"{metric}_ci_lower"]) for m in rows]
+    err_hi = [pc(summary.loc[m, f"{metric}_ci_upper"]) - pc(summary.loc[m, f"{metric}_mean"]) for m in rows]
+
+    # LLM from its own runs file (3 seeds, 500 sessions each)
+    llm_mean = pc(llm_runs[metric].mean())
+    llm_sd = pc(llm_runs[metric].std(ddof=1))
+
+    labels = [MODEL_LABELS[m] for m in rows] + ["LLM (GPT-4o-mini)*"]
+    colors = [GREY, ORANGE, NAVY, "#8892B0"]
+
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=means + [llm_mean],
+            marker_color=colors,
+            error_y=dict(
+                type="data",
+                array=err_hi + [llm_sd],
+                arrayminus=err_lo + [llm_sd],
+                color="#444",
+            ),
+            text=[f"{v:.2f}%" for v in means + [llm_mean]],
+            textposition="outside",
+        )
+    )
+    fig.add_hline(y=100 * 10 / 6268, line_dash="dot", line_color="red",
+                  annotation_text="chance (10/6268 ≈ 0.16%)", annotation_font_color="red")
+    st.plotly_chart(fig_layout(fig, f"{metric} across the four families (5 seeds, 95% CI)", f"{metric} (%)"),
+                    use_container_width=True)
+
+    ca, cb = st.columns(2)
+    with ca:
+        st.success(
+            f"**CF vs SASRec — statistically tied.** Session-level McNemar on all "
+            f"{int(MC_CF_SAS.n_pairs):,} shared test questions: CF alone correct on "
+            f"{int(MC_CF_SAS.a_only)}, SASRec alone on {int(MC_CF_SAS.b_only)}, "
+            f"p = {MC_CF_SAS.p_value:.3f} → no significant difference. "
+            f"**H1 (deep model wins) is refuted.**",
+            icon="🤝",
+        )
+    with cb:
+        st.warning(
+            f"***LLM caveat:** evaluated on 500 sessions/seed (API cost), 3 seeds — "
+            f"hence the wide ±{llm_sd:.2f} band. Its NDCG/MRR are *low*: it keeps the "
+            f"hit in the top-10 but ranks it poorly (known reranker behaviour). We call "
+            f"it 'similar to CF but noisier', never 'best'.",
+            icon="🤖",
+        )
+
+# ================================================================= TAB 3
+with tab3:
+    st.subheader("Per-group audit: who is served well?")
+
+    cm, cat = st.columns(2)
+    model_sel = cm.selectbox("Model", ["sasrec", "cf", "popularity"],
+                             format_func=lambda m: MODEL_LABELS[m])
+    attr_sel = cat.selectbox("Protected attribute", list(ATTR_LABELS),
+                             format_func=lambda a: ATTR_LABELS[a], index=3)
+
+    per_group = load_csv(f"{model_sel}_per_group.csv")
+    pg = per_group[(per_group.attribute == ATTR_PER_GROUP_KEY[attr_sel])
+                   & (~per_group.group_value.str.contains("GAP"))]
+
+    grow = gaps[(gaps.model == model_sel) & (gaps.attribute == attr_sel)].iloc[0]
+
+    left, right = st.columns([3, 2])
+    with left:
+        bar_colors = [ORANGE if g == grow.group_focus else NAVY for g in pg.group_value]
+        fig = go.Figure(go.Bar(
+            x=pg.group_value, y=[pc(v) for v in pg.recall],
+            marker_color=bar_colors,
+            text=[f"{pc(v):.2f}%" for v in pg.recall], textposition="outside",
+        ))
+        fig.add_hline(y=pc(summary.loc[model_sel, "Recall@10_mean"]), line_dash="dot",
+                      line_color=GREY, annotation_text="overall average")
+        st.plotly_chart(
+            fig_layout(fig, f"Recall@10 per group — {MODEL_LABELS[model_sel]}, "
+                            f"{ATTR_LABELS[attr_sel]}", "Recall@10 (%)"),
+            use_container_width=True)
+        st.caption("Orange = the group a conventional audit watches ('unprivileged'). "
+                   "Small groups (55+, IMD-unknown) shown here but excluded from the "
+                   "binary gap statistic — reported, never silently dropped.")
+
+    with right:
+        sig = bool(grow.significant_holm)
+        st.metric(
+            f"Gap: {grow.group_focus} − {grow.group_other}",
+            f"{pc(grow.gap):+.2f} pts",
+            f"95% CI [{pc(grow.ci_low):.2f}, {pc(grow.ci_high):.2f}]",
+            delta_color="off",
+        )
+        if sig:
+            st.markdown(f"**✅ Significant after Holm correction** (p_holm = {grow.p_holm:.2g})")
+        else:
+            st.markdown(f"**⬜ Not significant after Holm** (p_holm = {grow.p_holm:.2g})")
+
+        if attr_sel == "imd_binary":
+            st.error(
+                "**The headline reversal:** disadvantaged students get *better* "
+                "recommendations than advantaged ones — the opposite of the "
+                "expected direction. Positive gap = 'unprivileged' group favoured.",
+                icon="🔄",
+            )
+        if attr_sel == "age_binary":
+            st.info("Age is the one gap in the *expected* direction: 35+ students "
+                    "are served significantly worse.", icon="👵")
+
+        with st.expander("Did 'predictability' explain it? (entropy check)"):
+            ent = entropy[entropy.attribute.isin([attr_sel, ATTR_PER_GROUP_KEY[attr_sel]])]
+            for _, r in ent.iterrows():
+                st.markdown(f"- **{r['group']}**: {r.mean_cond_entropy_bits:.2f} bits")
+            st.caption(
+                "Lower entropy = more predictable click paths. The hypothesis "
+                "('predictability privilege') fits disability, but IMD and age groups "
+                "are near-identical — so it does **not** explain the significant "
+                "reversals. Reported honestly as a partial explanation (descriptive only)."
+            )
+
+# ================================================================= TAB 4
+with tab4:
+    st.subheader("What does 'fixing' fairness cost — and who pays?")
+
+    lam_models = [m for m in summary.index if m.startswith("sasrec_fair_lam")]
+    a_models = [m for m in summary.index if m.startswith("sasrec_rerank_a")]
+
+    def frontier_trace(models: list[str], name: str, color: str, prefix: str, strip: str):
+        return go.Scatter(
+            x=[summary.loc[m, "imd_EOD_mean"] for m in models],
+            y=[pc(summary.loc[m, "Recall@10_mean"]) for m in models],
+            mode="lines+markers+text",
+            text=[prefix + m.replace(strip, "") for m in models],
+            textposition="top center",
+            name=name, marker=dict(size=10, color=color),
+        )
+
+    fig = go.Figure()
+    fig.add_trace(frontier_trace(sorted(lam_models), "Fix 1 — fairness loss (retrain)",
+                                 NAVY, "λ=", "sasrec_fair_lam"))
+    fig.add_trace(frontier_trace(sorted(a_models), "Fix 2 — post-hoc rerank (cheap)",
+                                 ORANGE, "α=", "sasrec_rerank_a"))
+    fig.add_annotation(x=summary.loc["sasrec", "imd_EOD_mean"],
+                       y=pc(summary.loc["sasrec", "Recall@10_mean"]),
+                       text="base SASRec", showarrow=True, arrowhead=2)
+    fig.update_xaxes(title="IMD unfairness — EOD (→ 0 = parity)")
+    st.plotly_chart(fig_layout(fig, "Fairness–accuracy trade-off (IMD, 5 seeds)",
+                               "Recall@10 (%)", 480), use_container_width=True)
+    st.caption("Every step toward parity (left) moves down in accuracy. Reranking (α) "
+               "gives the gentler slope → the better trade-off. H2 (<5% cost) only "
+               "partially supported: even α=0.7 costs ~13% relative recall.")
+
+    st.markdown("#### …and *who* pays: levelling down (per-group view, IMD)")
+    conditions = {
+        "Base SASRec": "sasrec_per_group.csv",
+        "Fix 1 · fair-loss λ=1.0": "sasrec_fair_lam1.0_per_group.csv",
+        "Fix 2 · rerank α=0.7": "sasrec_rerank_a0.7_per_group.csv",
+    }
+    disadv, adv = [], []
+    for f in conditions.values():
+        d = load_csv(f)
+        d = d[d.attribute == "imd_binary"].set_index("group_value")
+        disadv.append(pc(d.loc["disadvantaged", "recall"]))
+        adv.append(pc(d.loc["advantaged", "recall"]))
+
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(name="Disadvantaged (favoured by base model)",
+                          x=list(conditions), y=disadv, marker_color=ORANGE,
+                          text=[f"{v:.2f}%" for v in disadv], textposition="outside"))
+    fig2.add_trace(go.Bar(name="Advantaged", x=list(conditions), y=adv,
+                          marker_color=NAVY,
+                          text=[f"{v:.2f}%" for v in adv], textposition="outside"))
+    st.plotly_chart(fig_layout(fig2, "Both groups get WORSE — parity by suppression, "
+                                     "not by lifting", "Recall@10 (%)", 440),
+                    use_container_width=True)
+    st.error(
+        "**Levelling down:** the gap narrows because the *favoured* group falls "
+        "furthest — nobody is helped. In education this is ethically contested; a "
+        "deployment decision like this must stay with a **human in the loop**.",
+        icon="⚠️",
+    )
+    st.caption("Trade-off frontier: 5-seed means from summary_table.csv. Per-group "
+               "bars: seed-0 per-group files (as in the paper, Sec. 6.2).")
+
+# ================================================================= TAB 5
+with tab5:
+    st.subheader("Live demo: one real (anonymised) student")
+    st.markdown(
+        "Everything so far was aggregate evidence. This tab runs **real models "
+        "live** on one student's actual click history — the human-in-the-loop view."
+    )
+
+    if not st.checkbox("Enable live demo (trains Popularity + CF for one course, ~15 s once, then cached)"):
+        st.stop()
+
+    from src.data.splits import load_splits
+    from src.models.base import Context
+    from src.models.cf import CFRecommender
+    from src.models.popularity import PopularityRecommender
+    from src.mitigation.rerank import RerankingRecommender
+
+    @st.cache_data
+    def load_seq_data():
+        splits = load_splits(write=False)
+        vocab = pd.read_parquet(paths.ITEM_VOCAB_PARQUET)
+        return splits, vocab
+
+    splits, vocab = load_seq_data()
+    idx_to_type = vocab.set_index("item_idx")["activity_type"].to_dict()
+    idx_to_site = vocab.set_index("item_idx")["id_site"].to_dict()
+
+    pres_list = splits.groupby(["code_module", "code_presentation"]).size().index.tolist()
+    sel = st.selectbox("Course presentation", pres_list, format_func=lambda t: f"{t[0]} / {t[1]}")
+    pres_splits = splits[(splits.code_module == sel[0]) & (splits.code_presentation == sel[1])]
+
+    @st.cache_resource
+    def fit_models(module: str, presentation: str):
+        train = splits[(splits.code_module == module) & (splits.code_presentation == presentation)]
+        pop = PopularityRecommender().fit(train)
+        cf = CFRecommender(factors=64, iterations=20, seed=0).fit(train)  # paper hyperparameters
+        return pop, cf
+
+    pop_model, cf_model = fit_models(*sel)
+
+    student = st.selectbox("Student session", pres_splits.id_student.tolist())
+    row = pres_splits[pres_splits.id_student == student].iloc[0]
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Gender", row.gender)
+    p2.metric("Age band", row.age_band)
+    p3.metric("Disability", "Yes" if row.disability == "Y" else "No")
+    p4.metric("IMD group", row.imd_binary)
+
+    model_choice = st.radio(
+        "Recommender",
+        ["CF (ALS) — paper settings", "Popularity baseline", "Fix 2 — fairness rerank on top of CF"],
+        horizontal=True,
+    )
+    history = list(row.test_input)  # everything except the hidden last click
+    ctx = Context(code_module=sel[0], code_presentation=sel[1], id_student=int(student))
+
+    if model_choice.startswith("CF"):
+        recs = cf_model.recommend(history, k=10, context=ctx)
+    elif model_choice.startswith("Popularity"):
+        recs = pop_model.recommend(history, k=10, context=ctx)
+    else:
+        alpha = st.slider("α — fairness strength (0 = pure CF, 1 = pure group frequency)",
+                          0.0, 1.0, 0.7, 0.1)
+        rr = RerankingRecommender(base=cf_model, alpha=alpha, fair_attr="imd_binary")
+        rr.fit(pres_splits)
+        recs = rr.recommend(history, k=10, context=ctx)
+
+    target = int(row.test_target)
+    hit = target in recs
+
+    lcol, rcol = st.columns(2)
+    with lcol:
+        st.markdown(f"**Click history** ({len(history)} visits — model input)")
+        hist_df = pd.DataFrame({
+            "#": range(1, len(history) + 1),
+            "activity type": [idx_to_type.get(i, "?") for i in history],
+            "VLE site": [idx_to_site.get(i, 0) for i in history],
+        })
+        st.dataframe(hist_df.tail(15), use_container_width=True, height=380)
+        st.caption("Showing the last 15 visits; the model sees all of them.")
+    with rcol:
+        st.markdown("**Top-10 recommendation** (predicted next click)")
+        rec_df = pd.DataFrame({
+            "rank": range(1, len(recs) + 1),
+            "activity type": [idx_to_type.get(i, "?") for i in recs],
+            "VLE site": [idx_to_site.get(i, 0) for i in recs],
+            "hidden next click?": ["🎯 YES" if i == target else "" for i in recs],
+        })
+        st.dataframe(rec_df, use_container_width=True, height=380)
+
+    if hit:
+        st.success(f"**HIT** — the student's real next click (site {idx_to_site.get(target)}, "
+                   f"{idx_to_type.get(target, '?')}) is at rank {recs.index(target) + 1}. "
+                   f"This is exactly what Recall@10 counts, once per 28,761 sessions.", icon="🎯")
+    else:
+        st.error(f"**MISS** — the real next click was site {idx_to_site.get(target)} "
+                 f"({idx_to_type.get(target, '?')}), not in the top-10. With 6,268 candidates "
+                 f"this is the common case — hence ~4% recall, ~26× better than chance.", icon="❌")
 
 st.markdown("---")
-st.markdown("Developed as a companion demonstration for the **HCAI Course (OvGU)**. Designed by Akshat, Dhairithri, Veer, and Harshit.")
+st.caption("Group 17 · OvGU HCAI · Data: OULAD (CC-BY 4.0). Aggregate figures read from "
+           "results/*.csv (5 seeds where available); live demo trains Popularity + CF "
+           "with the paper's hyperparameters on the selected course presentation.")

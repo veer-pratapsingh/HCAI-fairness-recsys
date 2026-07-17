@@ -23,6 +23,7 @@ google-generativeai>=0.5   # Gemini
 
 # Dashboard
 streamlit>=1.30
+plotly>=5.18
 
 # Config / utils
 pyyaml>=6.0
